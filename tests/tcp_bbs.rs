@@ -167,6 +167,40 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
     assert!(eve_public.contains("To: ALL"));
     assert!(eve_public.contains("heard by everyone"));
 
+    let alice_sent = alice.command("SENT").await?;
+    assert!(alice_sent.contains("Private subject"));
+    assert!(alice_sent.contains("Public subject"));
+    assert!(alice_sent.contains("TO M0BOB"));
+    assert!(alice_sent.contains("TO ALL"));
+    assert!(bob.command("SENT").await?.contains("No sent messages."));
+
+    assert!(
+        eve.command("DELETE 1")
+            .await?
+            .contains("Message not found or cannot be deleted.")
+    );
+    assert!(bob.command("READ 1").await?.contains("Private subject"));
+
+    assert!(bob.command("DELETE 1").await?.contains("Message deleted."));
+    assert!(bob.command("READ 1").await?.contains("Message not found."));
+    let alice_sent = alice.command("SENT").await?;
+    assert!(!alice_sent.contains("Private subject"));
+    assert!(alice_sent.contains("Public subject"));
+
+    assert!(
+        bob.command("DELETE 2")
+            .await?
+            .contains("Message not found or cannot be deleted.")
+    );
+    assert!(
+        alice
+            .command("DELETE 2")
+            .await?
+            .contains("Message deleted.")
+    );
+    assert!(eve.command("READ 2").await?.contains("Message not found."));
+    assert!(alice.command("SENT").await?.contains("No sent messages."));
+
     bbs.shutdown().await?;
     remove_database(&database_path);
     Ok(())

@@ -102,6 +102,36 @@ impl MailStore {
         .context("database list task failed")?
     }
 
+    pub async fn list_sent(&self, sender: Callsign) -> Result<Vec<MessageSummary>> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            let mut statement = connection.prepare(
+                "SELECT id, sender_callsign, recipient_callsign, subject, created_at
+                 FROM messages
+                 WHERE sender_callsign = ?1
+                 ORDER BY id DESC",
+            )?;
+            let messages = statement
+                .query_map(params![sender.as_str()], |row| {
+                    Ok(MessageSummary {
+                        id: row.get(0)?,
+                        sender: Callsign::parse(&row.get::<_, String>(1)?).map_err(to_sql_error)?,
+                        recipient: row
+                            .get::<_, Option<String>>(2)?
+                            .map(|value| Callsign::parse(&value).map_err(to_sql_error))
+                            .transpose()?,
+                        subject: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(messages)
+        })
+        .await
+        .context("database sent-list task failed")?
+    }
+
     pub async fn read_visible(&self, viewer: Callsign, id: i64) -> Result<Option<Message>> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
@@ -133,6 +163,22 @@ impl MailStore {
         .await
         .context("database read task failed")?
     }
+
+    pub async fn delete_authorized(&self, caller: Callsign, id: i64) -> Result<bool> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            let deleted = connection.execute(
+                "DELETE FROM messages
+                 WHERE id = ?1
+                   AND (sender_callsign = ?2 OR recipient_callsign = ?2)",
+                params![id, caller.as_str()],
+            )?;
+            Ok(deleted != 0)
+        })
+        .await
+        .context("database delete task failed")?
+    }
 }
 
 fn initialize(path: &Path) -> Result<()> {
@@ -153,7 +199,9 @@ fn initialize(path: &Path) -> Result<()> {
              )
          );
          CREATE INDEX IF NOT EXISTS messages_visible_by_recipient
-             ON messages (recipient_callsign, id DESC);",
+             ON messages (recipient_callsign, id DESC);
+         CREATE INDEX IF NOT EXISTS messages_by_sender
+             ON messages (sender_callsign, id DESC);",
     )?;
     Ok(())
 }
@@ -222,7 +270,7 @@ mod tests {
         assert_eq!(bob_messages[0].id, public_id);
         assert_eq!(
             store
-                .read_visible(bob, private_id)
+                .read_visible(bob.clone(), private_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -232,7 +280,36 @@ mod tests {
 
         let eve = Callsign::parse("M0EVE").unwrap();
         assert_eq!(store.list_visible(eve.clone()).await.unwrap().len(), 1);
-        assert!(store.read_visible(eve, private_id).await.unwrap().is_none());
+        assert!(
+            store
+                .read_visible(eve.clone(), private_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let alice = Callsign::parse("M0ALICE").unwrap();
+        let sent = store.list_sent(alice.clone()).await.unwrap();
+        assert_eq!(
+            sent.iter().map(|message| message.id).collect::<Vec<_>>(),
+            vec![public_id, private_id]
+        );
+
+        assert!(!store.delete_authorized(eve, private_id).await.unwrap());
+        assert!(
+            store
+                .delete_authorized(bob.clone(), private_id)
+                .await
+                .unwrap()
+        );
+        assert!(store.read_visible(bob, private_id).await.unwrap().is_none());
+        assert!(
+            store
+                .delete_authorized(alice.clone(), public_id)
+                .await
+                .unwrap()
+        );
+        assert!(store.list_sent(alice).await.unwrap().is_empty());
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite3-wal"));

@@ -48,6 +48,9 @@ where
             "LIST" if fields.next().is_none() => {
                 list_messages(&mut terminal, &store, identity.clone()).await?
             }
+            "SENT" if fields.next().is_none() => {
+                list_sent_messages(&mut terminal, &store, identity.clone()).await?
+            }
             "READ" => {
                 let Some(id) = fields.next() else {
                     terminal.write_line("Usage: READ <id>").await?;
@@ -60,6 +63,26 @@ where
                 match id.parse::<i64>() {
                     Ok(id) if id > 0 => {
                         read_message(&mut terminal, &store, identity.clone(), id).await?
+                    }
+                    _ => {
+                        terminal
+                            .write_line("Message ID must be a positive number.")
+                            .await?
+                    }
+                }
+            }
+            "DELETE" => {
+                let Some(id) = fields.next() else {
+                    terminal.write_line("Usage: DELETE <id>").await?;
+                    continue;
+                };
+                if fields.next().is_some() {
+                    terminal.write_line("Usage: DELETE <id>").await?;
+                    continue;
+                }
+                match id.parse::<i64>() {
+                    Ok(id) if id > 0 => {
+                        delete_message(&mut terminal, &store, identity.clone(), id).await?
                     }
                     _ => {
                         terminal
@@ -102,7 +125,13 @@ where
         .write_line("  LIST                 List public and your private messages")
         .await?;
     terminal
+        .write_line("  SENT                 List messages you sent")
+        .await?;
+    terminal
         .write_line("  READ <id>            Read a visible message")
+        .await?;
+    terminal
+        .write_line("  DELETE <id>          Delete mail you sent or received")
         .await?;
     terminal
         .write_line("  SEND <callsign|ALL>  Send private mail or post publicly")
@@ -113,6 +142,40 @@ where
     terminal
         .write_line("  QUIT                 Disconnect")
         .await?;
+    Ok(())
+}
+
+async fn list_sent_messages<S>(
+    terminal: &mut Terminal<S>,
+    store: &MailStore,
+    sender: Callsign,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let messages = store.list_sent(sender).await?;
+    if messages.is_empty() {
+        terminal.write_line("No sent messages.").await?;
+        return Ok(());
+    }
+
+    for message in messages {
+        let kind = if message.recipient.is_some() {
+            "MAIL"
+        } else {
+            "PUBLIC"
+        };
+        let recipient = message
+            .recipient
+            .as_ref()
+            .map_or_else(|| "ALL".to_owned(), ToString::to_string);
+        terminal
+            .write_line(&format!(
+                "#{} [{kind}] TO {recipient} {} - {}",
+                message.id, message.created_at, message.subject
+            ))
+            .await?;
+    }
     Ok(())
 }
 
@@ -160,6 +223,25 @@ where
         return Ok(());
     };
     write_message(terminal, message).await
+}
+
+async fn delete_message<S>(
+    terminal: &mut Terminal<S>,
+    store: &MailStore,
+    caller: Callsign,
+    id: i64,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if store.delete_authorized(caller, id).await? {
+        terminal.write_line("Message deleted.").await?;
+    } else {
+        terminal
+            .write_line("Message not found or cannot be deleted.")
+            .await?;
+    }
+    Ok(())
 }
 
 async fn write_message<S>(terminal: &mut Terminal<S>, message: Message) -> Result<()>
