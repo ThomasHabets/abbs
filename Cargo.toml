@@ -6,7 +6,7 @@ license = "MIT"
 authors = ["Thomas Habets <thomas@habets.se>"]
 repository = "https://github.com/ThomasHabets/abbs"
 description = "An amateur radio BBS"
-keywords = ["amateur radio", "radio", "bbs", "ax.25"]
+keywords = ["amateur", "radio", "bbs", "ax.25"]
 
 [dependencies]
 agw = "0.6.0"
