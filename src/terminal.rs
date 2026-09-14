@@ -37,18 +37,15 @@ where
                     return decode_line(line).map(Some);
                 }
 
-                match available
+                if let Some(position) = available
                     .iter()
                     .position(|byte| matches!(byte, b'\r' | b'\n'))
                 {
-                    Some(position) => {
-                        append_with_limit(&mut line, &available[..position])?;
-                        (position + 1, Some(available[position]))
-                    }
-                    None => {
-                        append_with_limit(&mut line, available)?;
-                        (available.len(), None)
-                    }
+                    append_with_limit(&mut line, &available[..position])?;
+                    (position + 1, Some(available[position]))
+                } else {
+                    append_with_limit(&mut line, available)?;
+                    (available.len(), None)
                 }
             };
 

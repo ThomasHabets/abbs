@@ -56,6 +56,7 @@ After connecting, type `HELP` to display the command list.
 | --- | --- |
 | `LIST` | List public posts and private mail addressed to you. |
 | `SENT` | List messages sent by your callsign. |
+| `LOGINS` | List the 10 most recent callsign logins, their transport, and time. |
 | `READ <id>` | Read a public message or private mail addressed to you. |
 | `SEND <callsign>` | Compose private mail. |
 | `SEND ALL` | Compose a public post. |
@@ -75,6 +76,9 @@ TCP callsign entry is an identity label, not authentication: a TCP user can
 claim any valid callsign. Private-message visibility and deletion permissions
 therefore rely on that stated callsign. Do not expose the TCP listener to
 untrusted users if stronger identity guarantees are required.
+
+`LOGINS` records and displays the callsign, login time, and whether the user
+connected over TCP or AX.25. It does not retain or display TCP IP addresses.
 
 ## Development
 
