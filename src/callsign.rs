@@ -21,6 +21,14 @@ impl Callsign {
         &self.0
     }
 
+    /// Return the callsign without an SSID suffix.
+    #[must_use]
+    pub fn base(&self) -> &str {
+        self.0
+            .split_once('-')
+            .map_or(self.as_str(), |(base, _)| base)
+    }
+
     /// Convert this callsign to the representation required by AGW.
     ///
     /// # Errors
@@ -62,6 +70,8 @@ mod tests {
     #[test]
     fn callsigns_are_normalized_and_validated() {
         assert_eq!(Callsign::parse(" m0abc-7 ").unwrap().as_str(), "M0ABC-7");
+        assert_eq!(Callsign::parse("m0abc-7").unwrap().base(), "M0ABC");
+        assert_eq!(Callsign::parse("m0abc").unwrap().base(), "M0ABC");
         assert!(Callsign::parse("").is_err());
         assert!(Callsign::parse("M0 ABC").is_err());
         assert!(Callsign::parse("TOO-LONG-11").is_err());

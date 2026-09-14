@@ -146,7 +146,7 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
 
     let saved = alice
         .send_message(
-            "M0BOB",
+            "M0BOB-7",
             "Private subject",
             &["first private line", "second private line"],
         )
@@ -173,10 +173,11 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
     assert!(eve_public.contains("To: ALL"));
     assert!(eve_public.contains("heard by everyone"));
 
-    let alice_sent = alice.command("SENT").await?;
+    let mut alice_ssid = Client::connect(address, "m0alice-3", b"\r\n").await?;
+    let alice_sent = alice_ssid.command("SENT").await?;
     assert!(alice_sent.contains("Private subject"));
     assert!(alice_sent.contains("Public subject"));
-    assert!(alice_sent.contains("TO M0BOB"));
+    assert!(alice_sent.contains("TO M0BOB-7"));
     assert!(alice_sent.contains("TO ALL"));
     assert!(bob.command("SENT").await?.contains("No sent messages."));
 
@@ -189,7 +190,7 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
 
     assert!(bob.command("DELETE 1").await?.contains("Message deleted."));
     assert!(bob.command("READ 1").await?.contains("Message not found."));
-    let alice_sent = alice.command("SENT").await?;
+    let alice_sent = alice_ssid.command("SENT").await?;
     assert!(!alice_sent.contains("Private subject"));
     assert!(alice_sent.contains("Public subject"));
 
@@ -199,13 +200,18 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
             .contains("Message not found or cannot be deleted.")
     );
     assert!(
-        alice
+        alice_ssid
             .command("DELETE 2")
             .await?
             .contains("Message deleted.")
     );
     assert!(eve.command("READ 2").await?.contains("Message not found."));
-    assert!(alice.command("SENT").await?.contains("No sent messages."));
+    assert!(
+        alice_ssid
+            .command("SENT")
+            .await?
+            .contains("No sent messages.")
+    );
 
     bbs.shutdown().await?;
     remove_database(&database_path);

@@ -70,6 +70,10 @@ message bodies to 4,000 characters.
 The terminal protocol accepts CR, CRLF, and LF input line endings and writes
 CRLF responses.
 
+Mailbox access ignores an SSID suffix: mail sent to `M0ABC-7` is visible to
+`M0ABC` and all of its SSIDs. Message listings retain the full callsigns used
+when a message was sent.
+
 ## Identity and privacy
 
 TCP callsign entry is an identity label, not authentication: a TCP user can

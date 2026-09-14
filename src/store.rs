@@ -78,14 +78,17 @@ impl MailStore {
             let is_public = i64::from(recipient.is_none());
             connection.execute(
                 "INSERT INTO messages \
-                 (sender_callsign, recipient_callsign, is_public, subject, body) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (sender_callsign, recipient_callsign, is_public, subject, body, \
+                  sender_base_callsign, recipient_base_callsign) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     sender.as_str(),
                     recipient.as_ref().map(Callsign::as_str),
                     is_public,
                     subject,
                     body,
+                    sender.base(),
+                    recipient.as_ref().map(Callsign::base),
                 ],
             )?;
             Ok(connection.last_insert_rowid())
@@ -155,11 +158,11 @@ impl MailStore {
             let mut statement = connection.prepare(
                 "SELECT id, sender_callsign, recipient_callsign, subject, created_at
                  FROM messages
-                 WHERE is_public = 1 OR recipient_callsign = ?1
+                 WHERE is_public = 1 OR recipient_base_callsign = ?1
                  ORDER BY id DESC",
             )?;
             let messages = statement
-                .query_map(params![viewer.as_str()], |row| {
+                .query_map(params![viewer.base()], |row| {
                     Ok(MessageSummary {
                         id: row.get(0)?,
                         sender: Callsign::parse(&row.get::<_, String>(1)?).map_err(to_sql_error)?,
@@ -185,11 +188,11 @@ impl MailStore {
             let mut statement = connection.prepare(
                 "SELECT id, sender_callsign, recipient_callsign, subject, created_at
                  FROM messages
-                 WHERE sender_callsign = ?1
+                 WHERE sender_base_callsign = ?1
                  ORDER BY id DESC",
             )?;
             let messages = statement
-                .query_map(params![sender.as_str()], |row| {
+                .query_map(params![sender.base()], |row| {
                     Ok(MessageSummary {
                         id: row.get(0)?,
                         sender: Callsign::parse(&row.get::<_, String>(1)?).map_err(to_sql_error)?,
@@ -216,8 +219,8 @@ impl MailStore {
                 .query_row(
                     "SELECT id, sender_callsign, recipient_callsign, subject, body, created_at
                      FROM messages
-                     WHERE id = ?1 AND (is_public = 1 OR recipient_callsign = ?2)",
-                    params![id, viewer.as_str()],
+                     WHERE id = ?1 AND (is_public = 1 OR recipient_base_callsign = ?2)",
+                    params![id, viewer.base()],
                     |row| {
                         Ok(Message {
                             id: row.get(0)?,
@@ -247,8 +250,8 @@ impl MailStore {
             let deleted = connection.execute(
                 "DELETE FROM messages
                  WHERE id = ?1
-                   AND (sender_callsign = ?2 OR recipient_callsign = ?2)",
-                params![id, caller.as_str()],
+                   AND (sender_base_callsign = ?2 OR recipient_base_callsign = ?2)",
+                params![id, caller.base()],
             )?;
             Ok(deleted != 0)
         })
@@ -264,7 +267,9 @@ fn initialize(path: &Path) -> Result<()> {
          CREATE TABLE IF NOT EXISTS messages (
              id INTEGER PRIMARY KEY,
              sender_callsign TEXT NOT NULL,
+             sender_base_callsign TEXT NOT NULL,
              recipient_callsign TEXT,
+             recipient_base_callsign TEXT,
              is_public INTEGER NOT NULL CHECK (is_public IN (0, 1)),
              subject TEXT NOT NULL,
              body TEXT NOT NULL,
@@ -286,6 +291,62 @@ fn initialize(path: &Path) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS logins_by_recency
              ON logins (id DESC);",
+    )?;
+    add_base_callsign_columns(&connection)?;
+    Ok(())
+}
+
+fn add_base_callsign_columns(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(messages)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if !columns
+        .iter()
+        .any(|column| column == "sender_base_callsign")
+    {
+        connection.execute(
+            "ALTER TABLE messages ADD COLUMN sender_base_callsign TEXT",
+            [],
+        )?;
+    }
+    if !columns
+        .iter()
+        .any(|column| column == "recipient_base_callsign")
+    {
+        connection.execute(
+            "ALTER TABLE messages ADD COLUMN recipient_base_callsign TEXT",
+            [],
+        )?;
+    }
+
+    connection.execute(
+        "UPDATE messages
+         SET sender_base_callsign = CASE
+             WHEN instr(sender_callsign, '-') > 0
+                 THEN substr(sender_callsign, 1, instr(sender_callsign, '-') - 1)
+             ELSE sender_callsign
+         END
+         WHERE sender_base_callsign IS NULL",
+        [],
+    )?;
+    connection.execute(
+        "UPDATE messages
+         SET recipient_base_callsign = CASE
+             WHEN recipient_callsign IS NULL THEN NULL
+             WHEN instr(recipient_callsign, '-') > 0
+                 THEN substr(recipient_callsign, 1, instr(recipient_callsign, '-') - 1)
+             ELSE recipient_callsign
+         END
+         WHERE recipient_base_callsign IS NULL",
+        [],
+    )?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS messages_visible_by_recipient_base
+             ON messages (recipient_base_callsign, id DESC);
+         CREATE INDEX IF NOT EXISTS messages_by_sender_base
+             ON messages (sender_base_callsign, id DESC);",
     )?;
     Ok(())
 }
@@ -314,6 +375,7 @@ mod tests {
 
     use super::{LoginTransport, MailStore, MessageSummary};
     use crate::callsign::Callsign;
+    use rusqlite::{Connection, params};
 
     static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
 
@@ -329,8 +391,8 @@ mod tests {
     async fn public_and_private_messages_have_correct_visibility() {
         let path = database_path();
         let store = MailStore::open(path.clone()).await.unwrap();
-        let alice = Callsign::parse("M0ALICE").unwrap();
-        let bob = Callsign::parse("M0BOB").unwrap();
+        let alice = Callsign::parse("M0ALICE-1").unwrap();
+        let bob = Callsign::parse("M0BOB-2").unwrap();
 
         let private_id = store
             .save(
@@ -346,12 +408,13 @@ mod tests {
             .await
             .unwrap();
 
-        let bob_messages = store.list_visible(bob.clone()).await.unwrap();
+        let bob_base = Callsign::parse("M0BOB").unwrap();
+        let bob_messages = store.list_visible(bob_base.clone()).await.unwrap();
         assert_eq!(bob_messages.len(), 2);
         assert_eq!(bob_messages[0].id, public_id);
         assert_eq!(
             store
-                .read_visible(bob.clone(), private_id)
+                .read_visible(bob_base.clone(), private_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -369,8 +432,8 @@ mod tests {
                 .is_none()
         );
 
-        let alice = Callsign::parse("M0ALICE").unwrap();
-        let sent = store.list_sent(alice.clone()).await.unwrap();
+        let alice_base = Callsign::parse("M0ALICE").unwrap();
+        let sent = store.list_sent(alice_base.clone()).await.unwrap();
         assert_eq!(
             sent.iter().map(|message| message.id).collect::<Vec<_>>(),
             vec![public_id, private_id]
@@ -379,19 +442,25 @@ mod tests {
         assert!(!store.delete_authorized(eve, private_id).await.unwrap());
         assert!(
             store
-                .delete_authorized(bob.clone(), private_id)
+                .delete_authorized(bob_base.clone(), private_id)
                 .await
                 .unwrap()
         );
-        assert!(store.read_visible(bob, private_id).await.unwrap().is_none());
         assert!(
             store
-                .delete_authorized(alice.clone(), public_id)
+                .read_visible(bob_base, private_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .delete_authorized(alice_base.clone(), public_id)
                 .await
                 .unwrap()
         );
         assert_eq!(
-            store.list_sent(alice).await.unwrap(),
+            store.list_sent(alice_base).await.unwrap(),
             [] as [MessageSummary; 0]
         );
 
@@ -408,6 +477,46 @@ mod tests {
         assert_eq!(logins[0].callsign.as_str(), "M0BOB");
         assert_eq!(logins[0].transport, LoginTransport::Ax25);
         assert_eq!(logins[1].transport, LoginTransport::Tcp);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn legacy_messages_are_backfilled_with_base_callsigns() {
+        let path = database_path();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    sender_callsign TEXT NOT NULL,
+                    recipient_callsign TEXT,
+                    is_public INTEGER NOT NULL,
+                    subject TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (sender_callsign, recipient_callsign, is_public, subject, body, created_at)
+                 VALUES (?1, ?2, 0, 'Legacy', 'body', '2026-09-14T00:00:00Z')",
+                params!["M0ALICE-1", "M0BOB-7"],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = MailStore::open(path.clone()).await.unwrap();
+        let bob = Callsign::parse("M0BOB").unwrap();
+        let alice = Callsign::parse("M0ALICE-3").unwrap();
+
+        assert_eq!(store.list_visible(bob.clone()).await.unwrap().len(), 1);
+        assert_eq!(store.list_sent(alice).await.unwrap().len(), 1);
+        assert!(store.delete_authorized(bob, 1).await.unwrap());
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
