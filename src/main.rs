@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(about = "Amateur radio BBS over AX.25 and TCP")]
+#[command(version, about = "Amateur radio BBS over AX.25 and TCP")]
 struct Cli {
     /// Callsign by which AX.25 users reach this BBS.
     #[arg(long)]
