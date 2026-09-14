@@ -312,7 +312,7 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::{LoginTransport, MailStore};
+    use super::{LoginTransport, MailStore, MessageSummary};
     use crate::callsign::Callsign;
 
     static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
@@ -390,7 +390,10 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(store.list_sent(alice).await.unwrap().is_empty());
+        assert_eq!(
+            store.list_sent(alice).await.unwrap(),
+            [] as [MessageSummary; 0]
+        );
 
         store
             .record_login(Callsign::parse("M0ALICE").unwrap(), LoginTransport::Tcp)
