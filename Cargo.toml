@@ -9,7 +9,7 @@ description = "An amateur radio BBS"
 keywords = ["amateur", "radio", "bbs", "ax25"]
 
 [dependencies]
-agw = "0.6.0"
+agw = "0.7.0"
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
 env_logger = "0.11.8"
@@ -19,4 +19,4 @@ rusqlite = "0.37.0"
 tokio = { version = "1.48.0", features = ["full"] }
 
 [patch.crates-io]
-agw = { path = "../agw" }
+#agw = { path = "../agw" }
