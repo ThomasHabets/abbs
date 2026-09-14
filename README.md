@@ -11,7 +11,7 @@ plain TCP terminal connections. Messages are stored in SQLite.
 - A current Rust toolchain.
 - SQLite development/runtime libraries available to `rusqlite`.
 - For AX.25 access, an AGWPE-compatible service. Direwolf can provide one with
-an `AGWPORT` configured.
+  an `AGWPORT` configured.
 
 ## Run
 
@@ -22,31 +22,31 @@ cargo run -- --callsign M0BBS
 ```
 
 By default this creates `abbs.sqlite3`, listens for TCP clients on port 8000,
-   and connects to an AGWPE endpoint at `127.0.0.1:8010` using radio port 1.
-   TCP stays available when the AGWPE endpoint is offline; the radio listener
-   retries every five seconds.
+and connects to an AGWPE endpoint at `127.0.0.1:8010` using radio port 1.  TCP
+stays available when the AGWPE endpoint is offline; the radio listener retries
+every five seconds.
 
-   ```text
-   Usage: abbs [OPTIONS] --callsign <CALLSIGN>
+```text
+Usage: abbs [OPTIONS] --callsign <CALLSIGN>
 
-   Options:
+Options:
 --callsign <CALLSIGN>      BBS callsign (required)
-    --db <PATH>                SQLite database path [default: abbs.sqlite3]
-    --tcp-listen <ADDRESS>     TCP bind address [default: 0.0.0.0:8000]
-    --agw-addr <ADDRESS>       AGWPE/Direwolf endpoint [default: 127.0.0.1:8010]
-    --agw-port <NUMBER>        AGWPE radio port [default: 1]
-    ```
+--db <PATH>                SQLite database path [default: abbs.sqlite3]
+--tcp-listen <ADDRESS>     TCP bind address [default: 0.0.0.0:8000]
+--agw-addr <ADDRESS>       AGWPE/Direwolf endpoint [default: 127.0.0.1:8010]
+--agw-port <NUMBER>        AGWPE radio port [default: 1]
+```
 
-    For a local TCP session:
+For a local TCP session:
 
-    ```sh
-    nc 127.0.0.1 8000
-    ```
+```sh
+nc 127.0.0.1 8000
+```
 
-    The BBS prompts for a callsign on TCP. AX.25 sessions receive their identity
-    from the remote callsign reported by AGWPE. Callsigns are normalized to
-    uppercase and must be ASCII alphanumeric/hyphen values no longer than ten
-    characters.
+The BBS prompts for a callsign on TCP. AX.25 sessions receive their identity
+from the remote callsign reported by AGWPE. Callsigns are normalized to
+uppercase and must be ASCII alphanumeric/hyphen values no longer than ten
+characters.
 
 ## Commands
 
