@@ -108,11 +108,20 @@ fn database_path() -> PathBuf {
     ))
 }
 
-async fn start_test_bbs() -> Result<(BbsHandle, PathBuf)> {
+async fn start_test_bbs() -> Result<(BbsHandle, PathBuf, PathBuf)> {
+    start_test_bbs_with_zmodem_sender(PathBuf::from("sz")).await
+}
+
+async fn start_test_bbs_with_zmodem_sender(
+    zmodem_sender: PathBuf,
+) -> Result<(BbsHandle, PathBuf, PathBuf)> {
     let database_path = database_path();
+    let files_dir = database_path.with_extension("files");
     let bbs = start(BbsConfig {
         callsign: Callsign::parse("M0BBS")?,
         database_path: database_path.clone(),
+        files_dir: files_dir.clone(),
+        zmodem_sender,
         tcp_listen: "127.0.0.1:0".parse()?,
         // No AGW server is needed for TCP functionality; the BBS must remain
         // available while its radio listener retries.
@@ -120,7 +129,7 @@ async fn start_test_bbs() -> Result<(BbsHandle, PathBuf)> {
         agw_port: 1,
     })
     .await?;
-    Ok((bbs, database_path))
+    Ok((bbs, database_path, files_dir))
 }
 
 fn remove_database(path: &PathBuf) {
@@ -131,8 +140,9 @@ fn remove_database(path: &PathBuf) {
 
 #[tokio::test]
 async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf() -> Result<()> {
-    let (bbs, database_path) = start_test_bbs().await?;
+    let (bbs, database_path, files_dir) = start_test_bbs().await?;
     let address = bbs.tcp_addr();
+    fs::write(files_dir.join("bulletin.txt"), b"CQ CQ")?;
 
     let mut alice = Client::connect(address, "m0alice", b"\r").await?;
     let mut bob = Client::connect(address, "m0bob", b"\r\n").await?;
@@ -143,6 +153,14 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
     assert!(logins.contains("M0BOB via TCP"));
     assert!(logins.contains("M0EVE via TCP"));
     assert!(!logins.contains("127.0.0.1"));
+
+    let files = eve.command("FILES").await?;
+    assert!(files.contains("bulletin.txt (5 bytes)"));
+    assert!(
+        eve.command("DOWNLOAD ../bulletin.txt")
+            .await?
+            .contains("Invalid file name.")
+    );
 
     let saved = alice
         .send_message(
@@ -215,5 +233,60 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
 
     bbs.shutdown().await?;
     remove_database(&database_path);
+    let _ = fs::remove_dir_all(files_dir);
     Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn successful_download_stays_silent_until_the_next_command() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sender_dir = database_path().with_extension("sz-bin");
+    fs::create_dir(&sender_dir)?;
+    let sender = sender_dir.join("sz");
+    fs::write(
+        &sender,
+        "#!/bin/sh\nprintf 'ZMODEM-START'\nIFS= read -r reply\nprintf 'ZMODEM-END'\n",
+    )?;
+    let mut permissions = fs::metadata(&sender)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&sender, permissions)?;
+
+    let (bbs, database_path, files_dir) = start_test_bbs_with_zmodem_sender(sender).await?;
+    let test_result = async {
+        fs::write(files_dir.join("bulletin.txt"), b"CQ CQ")?;
+        let mut client = Client::connect(bbs.tcp_addr(), "m0alice", b"\r\n").await?;
+
+        client.send_line("DOWNLOAD bulletin.txt").await?;
+        assert!(
+            client
+                .read_until(b"ZMODEM-START")
+                .await?
+                .contains("Starting ZMODEM download.")
+        );
+        client.stream.write_all(b"ack\n").await?;
+        client.stream.flush().await?;
+        client.read_until(b"ZMODEM-END").await?;
+
+        let mut buffer = [0_u8; 32];
+        assert!(
+            timeout(Duration::from_millis(100), client.stream.read(&mut buffer))
+                .await
+                .is_err(),
+            "BBS sent terminal data before the next command"
+        );
+
+        assert!(client.command("LIST").await?.contains("No messages."));
+        Ok(())
+    }
+    .await;
+
+    let shutdown_result = bbs.shutdown().await;
+    remove_database(&database_path);
+    let _ = fs::remove_dir_all(files_dir);
+    let _ = fs::remove_dir_all(sender_dir);
+
+    shutdown_result?;
+    test_result
 }

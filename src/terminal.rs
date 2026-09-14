@@ -1,7 +1,7 @@
 use std::io;
 
 use anyhow::{Result, bail};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 const MAX_LINE_BYTES: usize = 16 * 1024;
 
@@ -67,6 +67,31 @@ where
         self.write("\r\n").await
     }
 
+    pub async fn read_bytes(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let read = self.reader.read(buffer).await?;
+            if read == 0 {
+                return Ok(0);
+            }
+            if self.skip_optional_lf {
+                self.skip_optional_lf = false;
+                if buffer[0] == b'\n' {
+                    if read == 1 {
+                        continue;
+                    }
+                    buffer.copy_within(1..read, 0);
+                    return Ok(read - 1);
+                }
+            }
+            return Ok(read);
+        }
+    }
+
+    pub async fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.reader.get_mut().write_all(bytes).await?;
+        self.reader.get_mut().flush().await
+    }
+
     pub async fn shutdown(&mut self) -> io::Result<()> {
         self.reader.get_mut().shutdown().await
     }
@@ -124,5 +149,21 @@ mod tests {
             Some("three")
         );
         assert_eq!(terminal.read_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn raw_reads_discard_the_lf_after_a_command_crlf() {
+        let (mut client, server) = duplex(128);
+        client.write_all(b"DOWNLOAD file\r\nZMODEM").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut terminal = Terminal::new(server);
+        assert_eq!(
+            terminal.read_line().await.unwrap().as_deref(),
+            Some("DOWNLOAD file")
+        );
+        let mut buffer = [0; 16];
+        let read = terminal.read_bytes(&mut buffer).await.unwrap();
+        assert_eq!(&buffer[..read], b"ZMODEM");
     }
 }

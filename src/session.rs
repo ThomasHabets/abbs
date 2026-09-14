@@ -1,8 +1,18 @@
-use anyhow::Result;
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    str::SplitWhitespace,
+};
+
+use anyhow::{Context, Result};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    process::Command,
+};
 
 use crate::{
     callsign::Callsign,
+    files::FileArea,
     store::{LoginTransport, MailStore, Message},
     terminal::Terminal,
 };
@@ -16,6 +26,8 @@ pub async fn run_session<S>(
     identity: Callsign,
     bbs_callsign: Callsign,
     store: MailStore,
+    files: FileArea,
+    zmodem_sender: PathBuf,
     show_bbs_welcome: bool,
 ) -> Result<()>
 where
@@ -31,8 +43,17 @@ where
         .await?;
     terminal.write_line("Type HELP for commands.").await?;
 
+    // ZMODEM's final acknowledgement is followed very closely by the sender
+    // exiting.  Do not put ordinary terminal bytes behind it: a client-side
+    // `rz` can still be consuming the final frame and would treat a prompt as
+    // protocol input.  After a successful download, wait for the caller's
+    // next command before resuming normal prompt output.
+    let mut write_prompt = true;
     loop {
-        terminal.write("> ").await?;
+        if write_prompt {
+            terminal.write("> ").await?;
+        }
+        write_prompt = true;
         let Some(line) = terminal.read_line().await? else {
             terminal.shutdown().await?;
             return Ok(());
@@ -55,57 +76,16 @@ where
             "LOGINS" if fields.next().is_none() => {
                 list_recent_logins(&mut terminal, &store).await?;
             }
-            "READ" => {
-                let Some(id) = fields.next() else {
-                    terminal.write_line("Usage: READ <id>").await?;
-                    continue;
-                };
-                if fields.next().is_some() {
-                    terminal.write_line("Usage: READ <id>").await?;
-                    continue;
-                }
-                match id.parse::<i64>() {
-                    Ok(id) if id > 0 => {
-                        read_message(&mut terminal, &store, identity.clone(), id).await?;
-                    }
-                    _ => {
-                        terminal
-                            .write_line("Message ID must be a positive number.")
-                            .await?;
-                    }
-                }
+            "FILES" if fields.next().is_none() => {
+                list_files(&mut terminal, &files).await?;
             }
-            "DELETE" => {
-                let Some(id) = fields.next() else {
-                    terminal.write_line("Usage: DELETE <id>").await?;
-                    continue;
-                };
-                if fields.next().is_some() {
-                    terminal.write_line("Usage: DELETE <id>").await?;
-                    continue;
-                }
-                match id.parse::<i64>() {
-                    Ok(id) if id > 0 => {
-                        delete_message(&mut terminal, &store, identity.clone(), id).await?;
-                    }
-                    _ => {
-                        terminal
-                            .write_line("Message ID must be a positive number.")
-                            .await?;
-                    }
-                }
+            "DOWNLOAD" => {
+                write_prompt =
+                    download_command(&mut terminal, &files, &zmodem_sender, &mut fields).await?;
             }
-            "SEND" => {
-                let Some(recipient) = fields.next() else {
-                    terminal.write_line("Usage: SEND <callsign|ALL>").await?;
-                    continue;
-                };
-                if fields.next().is_some() {
-                    terminal.write_line("Usage: SEND <callsign|ALL>").await?;
-                    continue;
-                }
-                compose_message(&mut terminal, &store, identity.clone(), recipient).await?;
-            }
+            "READ" => read_command(&mut terminal, &store, &identity, &mut fields).await?,
+            "DELETE" => delete_command(&mut terminal, &store, &identity, &mut fields).await?,
+            "SEND" => send_command(&mut terminal, &store, &identity, &mut fields).await?,
             "QUIT" if fields.next().is_none() => {
                 terminal.write_line("Goodbye.").await?;
                 terminal.shutdown().await?;
@@ -118,6 +98,107 @@ where
             }
         }
     }
+}
+
+async fn download_command<S>(
+    terminal: &mut Terminal<S>,
+    files: &FileArea,
+    zmodem_sender: &Path,
+    fields: &mut SplitWhitespace<'_>,
+) -> Result<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(name) = fields.next() else {
+        terminal.write_line("Usage: DOWNLOAD <file>").await?;
+        return Ok(true);
+    };
+    if fields.next().is_some() {
+        terminal.write_line("Usage: DOWNLOAD <file>").await?;
+        return Ok(true);
+    }
+    Box::pin(download_file(terminal, files, zmodem_sender, name)).await
+}
+
+async fn read_command<S>(
+    terminal: &mut Terminal<S>,
+    store: &MailStore,
+    identity: &Callsign,
+    fields: &mut SplitWhitespace<'_>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(id) = parse_message_id(terminal, fields, "READ").await? else {
+        return Ok(());
+    };
+    read_message(terminal, store, identity.clone(), id).await
+}
+
+async fn delete_command<S>(
+    terminal: &mut Terminal<S>,
+    store: &MailStore,
+    identity: &Callsign,
+    fields: &mut SplitWhitespace<'_>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(id) = parse_message_id(terminal, fields, "DELETE").await? else {
+        return Ok(());
+    };
+    delete_message(terminal, store, identity.clone(), id).await
+}
+
+async fn parse_message_id<S>(
+    terminal: &mut Terminal<S>,
+    fields: &mut SplitWhitespace<'_>,
+    command: &str,
+) -> Result<Option<i64>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(id) = fields.next() else {
+        terminal
+            .write_line(&format!("Usage: {command} <id>"))
+            .await?;
+        return Ok(None);
+    };
+    if fields.next().is_some() {
+        terminal
+            .write_line(&format!("Usage: {command} <id>"))
+            .await?;
+        return Ok(None);
+    }
+    match id.parse::<i64>() {
+        Ok(id) if id > 0 => Ok(Some(id)),
+        _ => {
+            terminal
+                .write_line("Message ID must be a positive number.")
+                .await?;
+            Ok(None)
+        }
+    }
+}
+
+async fn send_command<S>(
+    terminal: &mut Terminal<S>,
+    store: &MailStore,
+    identity: &Callsign,
+    fields: &mut SplitWhitespace<'_>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(recipient) = fields.next() else {
+        terminal.write_line("Usage: SEND <callsign|ALL>").await?;
+        return Ok(());
+    };
+    if fields.next().is_some() {
+        terminal.write_line("Usage: SEND <callsign|ALL>").await?;
+        return Ok(());
+    }
+    compose_message(terminal, store, identity.clone(), recipient).await
 }
 
 async fn write_help<S>(terminal: &mut Terminal<S>) -> Result<()>
@@ -135,6 +216,12 @@ where
         .write_line("  LOGINS               List the 10 most recent logins")
         .await?;
     terminal
+        .write_line("  FILES                List files available for download")
+        .await?;
+    terminal
+        .write_line("  DOWNLOAD <file>      Download a file using ZMODEM")
+        .await?;
+    terminal
         .write_line("  READ <id>            Read a visible message")
         .await?;
     terminal
@@ -149,6 +236,116 @@ where
     terminal
         .write_line("  QUIT                 Disconnect")
         .await?;
+    Ok(())
+}
+
+async fn list_files<S>(terminal: &mut Terminal<S>, files: &FileArea) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let available = files.list().await?;
+    if available.is_empty() {
+        terminal.write_line("No files available.").await?;
+        return Ok(());
+    }
+
+    terminal.write_line("Available files:").await?;
+    for file in available {
+        terminal
+            .write_line(&format!("{} ({} bytes)", file.name, file.size))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn download_file<S>(
+    terminal: &mut Terminal<S>,
+    files: &FileArea,
+    zmodem_sender: &Path,
+    name: &str,
+) -> Result<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let path = match files.resolve_download(name).await {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            terminal.write_line("File not found.").await?;
+            return Ok(true);
+        }
+        Err(_) => {
+            terminal.write_line("Invalid file name.").await?;
+            return Ok(true);
+        }
+    };
+
+    terminal.write_line("Starting ZMODEM download.").await?;
+    if Box::pin(send_zmodem(terminal, &path, zmodem_sender))
+        .await
+        .is_ok()
+    {
+        // Leave the wire silent after `sz` finishes.  The remote `rz` needs
+        // to consume the last ZMODEM frame before the client sends its next
+        // command, at which point the ordinary command response is safe.
+        Ok(false)
+    } else {
+        terminal.write_line("Download failed.").await?;
+        Ok(true)
+    }
+}
+
+async fn send_zmodem<S>(terminal: &mut Terminal<S>, path: &Path, zmodem_sender: &Path) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut child = Command::new(zmodem_sender)
+        .arg("--binary")
+        .arg("--")
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to start sz")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("sz did not provide standard input")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("sz did not provide standard output")?;
+    let mut from_client = [0_u8; 8 * 1024];
+    let mut to_client = [0_u8; 8 * 1024];
+    let mut client_closed = false;
+
+    loop {
+        tokio::select! {
+            read = stdout.read(&mut to_client) => {
+                let read = read.context("failed to read sz output")?;
+                if read == 0 {
+                    break;
+                }
+                terminal.write_bytes(&to_client[..read]).await?;
+            }
+            read = terminal.read_bytes(&mut from_client), if !client_closed => {
+                let read = read.context("failed to read client ZMODEM input")?;
+                if read == 0 {
+                    stdin.shutdown().await.context("failed to close sz input")?;
+                    client_closed = true;
+                } else {
+                    stdin
+                        .write_all(&from_client[..read])
+                        .await
+                        .context("failed to forward client ZMODEM input")?;
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await.context("failed to wait for sz")?;
+    anyhow::ensure!(status.success(), "sz exited unsuccessfully: {status}");
     Ok(())
 }
 

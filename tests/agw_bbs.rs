@@ -86,9 +86,12 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
     });
 
     let database_path = database_path();
+    let files_dir = database_path.with_extension("files");
     let bbs = start(BbsConfig {
         callsign: Callsign::parse("M0BBS")?,
         database_path: database_path.clone(),
+        files_dir: files_dir.clone(),
+        zmodem_sender: PathBuf::from("sz"),
         tcp_listen: "127.0.0.1:0".parse()?,
         agw_addr,
         agw_port: 1,
@@ -102,5 +105,6 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
     let _ = fs::remove_file(&database_path);
     let _ = fs::remove_file(database_path.with_extension("sqlite3-wal"));
     let _ = fs::remove_file(database_path.with_extension("sqlite3-shm"));
+    let _ = fs::remove_dir_all(files_dir);
     Ok(())
 }

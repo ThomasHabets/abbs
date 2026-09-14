@@ -15,6 +15,10 @@ struct Cli {
     #[arg(long, default_value = "abbs.sqlite3")]
     db: PathBuf,
 
+    /// Directory containing files available for download.
+    #[arg(long, default_value = "files")]
+    files_dir: PathBuf,
+
     /// TCP address for terminal clients.
     #[arg(long, default_value = "0.0.0.0:8000")]
     tcp_listen: SocketAddr,
@@ -35,6 +39,8 @@ async fn main() -> Result<()> {
     let config = BbsConfig {
         callsign: Callsign::parse(&cli.callsign)?,
         database_path: cli.db,
+        files_dir: cli.files_dir,
+        zmodem_sender: PathBuf::from("sz"),
         tcp_listen: cli.tcp_listen,
         agw_addr: cli.agw_addr,
         agw_port: cli.agw_port,

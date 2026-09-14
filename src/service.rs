@@ -13,6 +13,7 @@ use tokio::{
 
 use crate::{
     callsign::Callsign,
+    files::FileArea,
     session::run_session,
     store::{LoginTransport, MailStore},
     terminal::Terminal,
@@ -24,6 +25,8 @@ type Ax25SessionFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 pub struct BbsConfig {
     pub callsign: Callsign,
     pub database_path: std::path::PathBuf,
+    pub files_dir: std::path::PathBuf,
+    pub zmodem_sender: std::path::PathBuf,
     pub tcp_listen: SocketAddr,
     pub agw_addr: String,
     pub agw_port: u8,
@@ -62,6 +65,7 @@ impl BbsHandle {
 /// Returns an error if SQLite initialization or TCP listener binding fails.
 pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
     let store = MailStore::open(config.database_path.clone()).await?;
+    let files = FileArea::open(config.files_dir.clone()).await?;
     let tcp_listener = TcpListener::bind(config.tcp_listen)
         .await
         .with_context(|| format!("failed to bind TCP listener at {}", config.tcp_listen))?;
@@ -72,9 +76,10 @@ pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
         tcp_listener,
         config.clone(),
         store.clone(),
+        files.clone(),
         shutdown.subscribe(),
     ));
-    let agw_task = tokio::spawn(agw_supervisor(config, store, shutdown.subscribe()));
+    let agw_task = tokio::spawn(agw_supervisor(config, store, files, shutdown.subscribe()));
 
     Ok(BbsHandle {
         tcp_addr,
@@ -87,6 +92,7 @@ async fn tcp_listener_loop(
     listener: TcpListener,
     config: BbsConfig,
     store: MailStore,
+    files: FileArea,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     let mut sessions = JoinSet::new();
@@ -97,8 +103,9 @@ async fn tcp_listener_loop(
                 Ok((stream, _)) => {
                     let config = config.clone();
                     let store = store.clone();
+                    let files = files.clone();
                     sessions.spawn(async move {
-                        if let Err(error) = handle_tcp_session(stream, config, store).await {
+                        if let Err(error) = Box::pin(handle_tcp_session(stream, config, store, files)).await {
                             warn!("TCP session ended with error: {error:#}");
                         }
                     });
@@ -117,7 +124,12 @@ async fn tcp_listener_loop(
     while sessions.join_next().await.is_some() {}
 }
 
-async fn handle_tcp_session(stream: TcpStream, config: BbsConfig, store: MailStore) -> Result<()> {
+async fn handle_tcp_session(
+    stream: TcpStream,
+    config: BbsConfig,
+    store: MailStore,
+    files: FileArea,
+) -> Result<()> {
     let mut terminal = Terminal::new(stream);
     terminal
         .write_line(&format!(
@@ -136,7 +148,16 @@ async fn handle_tcp_session(stream: TcpStream, config: BbsConfig, store: MailSto
                 store
                     .record_login(callsign.clone(), LoginTransport::Tcp)
                     .await?;
-                return run_session(terminal, callsign, config.callsign, store, false).await;
+                return Box::pin(run_session(
+                    terminal,
+                    callsign,
+                    config.callsign,
+                    store,
+                    files,
+                    config.zmodem_sender,
+                    false,
+                ))
+                .await;
             }
             Err(error) => {
                 terminal
@@ -157,13 +178,14 @@ async fn handle_tcp_session(stream: TcpStream, config: BbsConfig, store: MailSto
 async fn agw_supervisor(
     config: BbsConfig,
     store: MailStore,
+    files: FileArea,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     loop {
         let listener_shutdown = shutdown.resubscribe();
         let result = tokio::select! {
             _ = shutdown.recv() => return,
-            result = run_agw_listener(config.clone(), store.clone(), listener_shutdown) => result,
+            result = run_agw_listener(config.clone(), store.clone(), files.clone(), listener_shutdown) => result,
         };
         match result {
             Ok(()) => warn!("AGW listener stopped; retrying in five seconds"),
@@ -179,6 +201,7 @@ async fn agw_supervisor(
 async fn run_agw_listener(
     config: BbsConfig,
     store: MailStore,
+    files: FileArea,
     mut shutdown: broadcast::Receiver<()>,
 ) -> Result<()> {
     let agw = AGW::new(&config.agw_addr)
@@ -204,13 +227,15 @@ async fn run_agw_listener(
                 let remote = Callsign::parse(&connection.dst().to_string())
                     .context("AGW supplied an invalid remote callsign")?;
                 let bbs_callsign = config.callsign.clone();
+                let zmodem_sender = config.zmodem_sender.clone();
                 let store = store.clone();
+                let files = files.clone();
                 sessions.push(Box::pin(async move {
                     if let Err(error) = store.record_login(remote.clone(), LoginTransport::Ax25).await {
                         warn!("failed to record AX.25 login: {error:#}");
                         return;
                     }
-                    if let Err(error) = run_session(Terminal::new(connection), remote, bbs_callsign, store, true).await {
+                    if let Err(error) = Box::pin(run_session(Terminal::new(connection), remote, bbs_callsign, store, files, zmodem_sender, true)).await {
                         warn!("AX.25 session ended with error: {error:#}");
                     }
                 }));

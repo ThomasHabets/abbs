@@ -26,12 +26,15 @@ and connects to an AGWPE endpoint at `127.0.0.1:8010` using radio port 1.  TCP
 stays available when the AGWPE endpoint is offline; the radio listener retries
 every five seconds.
 
+Files offered for download are placed in the `files` directory by default.
+
 ```text
 Usage: abbs [OPTIONS] --callsign <CALLSIGN>
 
 Options:
 --callsign <CALLSIGN>      BBS callsign (required)
 --db <PATH>                SQLite database path [default: abbs.sqlite3]
+--files-dir <PATH>         Directory containing downloadable files [default: files]
 --tcp-listen <ADDRESS>     TCP bind address [default: 0.0.0.0:8000]
 --agw-addr <ADDRESS>       AGWPE/Direwolf endpoint [default: 127.0.0.1:8010]
 --agw-port <NUMBER>        AGWPE radio port [default: 1]
@@ -57,6 +60,8 @@ After connecting, type `HELP` to display the command list.
 | `LIST` | List public posts and private mail addressed to you. |
 | `SENT` | List messages sent by your callsign. |
 | `LOGINS` | List the 10 most recent callsign logins, their transport, and time. |
+| `FILES` | List files available for download. |
+| `DOWNLOAD <file>` | Send one listed file using ZMODEM. |
 | `READ <id>` | Read a public message or private mail addressed to you. |
 | `SEND <callsign>` | Compose private mail. |
 | `SEND ALL` | Compose a public post. |
@@ -73,6 +78,15 @@ CRLF responses.
 Mailbox access ignores an SSID suffix: mail sent to `M0ABC-7` is visible to
 `M0ABC` and all of its SSIDs. Message listings retain the full callsigns used
 when a message was sent.
+
+`DOWNLOAD` invokes the external `sz` utility in binary ZMODEM mode. The client
+must start `rz` when it detects the ZMODEM header. Only immediate regular files
+with a simple, non-whitespace filename are listed or downloadable; paths,
+directories, and symlinks are excluded to prevent directory traversal.
+After a successful transfer the BBS deliberately sends no completion text or
+prompt, so that it cannot be mistaken for the final ZMODEM frame by the
+client's `rz`. Send the next command normally once the client reports that the
+transfer has finished.
 
 ## Identity and privacy
 
