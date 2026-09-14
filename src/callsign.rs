@@ -7,14 +7,25 @@ use anyhow::{Result, bail};
 pub struct Callsign(String);
 
 impl Callsign {
+    /// Parse, validate, and normalize a callsign to uppercase.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is empty or not valid for an AGW callsign.
     pub fn parse(input: &str) -> Result<Self> {
         input.parse()
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Convert this callsign to the representation required by AGW.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the normalized callsign cannot be represented by AGW.
     pub fn to_agw_call(&self) -> Result<agw::Call> {
         self.0
             .parse()

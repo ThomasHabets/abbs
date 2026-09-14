@@ -138,6 +138,12 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
     let mut bob = Client::connect(address, "m0bob", b"\r\n").await?;
     let mut eve = Client::connect(address, "m0eve", b"\r\n").await?;
 
+    let logins = eve.command("LOGINS").await?;
+    assert!(logins.contains("M0ALICE via TCP"));
+    assert!(logins.contains("M0BOB via TCP"));
+    assert!(logins.contains("M0EVE via TCP"));
+    assert!(!logins.contains("127.0.0.1"));
+
     let saved = alice
         .send_message(
             "M0BOB",

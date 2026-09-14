@@ -33,6 +33,28 @@ pub struct Message {
     pub created_at: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoginTransport {
+    Tcp,
+    Ax25,
+}
+
+impl LoginTransport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "TCP",
+            Self::Ax25 => "AX.25",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct LoginRecord {
+    pub callsign: Callsign,
+    pub transport: LoginTransport,
+    pub logged_in_at: String,
+}
+
 impl MailStore {
     pub async fn open(path: PathBuf) -> Result<Self> {
         let path = Arc::new(path);
@@ -70,6 +92,60 @@ impl MailStore {
         })
         .await
         .context("database save task failed")?
+    }
+
+    pub async fn record_login(&self, callsign: Callsign, transport: LoginTransport) -> Result<()> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            connection.execute(
+                "INSERT INTO logins (callsign, transport) VALUES (?1, ?2)",
+                params![callsign.as_str(), transport.as_str()],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("login-record task failed")?
+    }
+
+    pub async fn recent_logins(&self, limit: usize) -> Result<Vec<LoginRecord>> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            let mut statement = connection.prepare(
+                "SELECT callsign, transport, logged_in_at
+                 FROM logins
+                 ORDER BY id DESC
+                 LIMIT ?1",
+            )?;
+            let records = statement
+                .query_map(params![limit], |row| {
+                    let transport = match row.get::<_, String>(1)?.as_str() {
+                        "TCP" => LoginTransport::Tcp,
+                        "AX.25" => LoginTransport::Ax25,
+                        other => {
+                            return Err(rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("invalid login transport {other:?}"),
+                                )),
+                            ));
+                        }
+                    };
+                    Ok(LoginRecord {
+                        callsign: Callsign::parse(&row.get::<_, String>(0)?)
+                            .map_err(to_sql_error)?,
+                        transport,
+                        logged_in_at: row.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(records)
+        })
+        .await
+        .context("recent-login task failed")?
     }
 
     pub async fn list_visible(&self, viewer: Callsign) -> Result<Vec<MessageSummary>> {
@@ -201,7 +277,15 @@ fn initialize(path: &Path) -> Result<()> {
          CREATE INDEX IF NOT EXISTS messages_visible_by_recipient
              ON messages (recipient_callsign, id DESC);
          CREATE INDEX IF NOT EXISTS messages_by_sender
-             ON messages (sender_callsign, id DESC);",
+             ON messages (sender_callsign, id DESC);
+         CREATE TABLE IF NOT EXISTS logins (
+             id INTEGER PRIMARY KEY,
+             callsign TEXT NOT NULL,
+             transport TEXT NOT NULL CHECK (transport IN ('TCP', 'AX.25')),
+             logged_in_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         );
+         CREATE INDEX IF NOT EXISTS logins_by_recency
+             ON logins (id DESC);",
     )?;
     Ok(())
 }
@@ -217,10 +301,7 @@ fn to_sql_error(error: anyhow::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
         rusqlite::types::Type::Text,
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            error.to_string(),
-        )),
+        error.into_boxed_dyn_error(),
     )
 }
 
@@ -231,7 +312,7 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::MailStore;
+    use super::{LoginTransport, MailStore};
     use crate::callsign::Callsign;
 
     static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
@@ -310,6 +391,20 @@ mod tests {
                 .unwrap()
         );
         assert!(store.list_sent(alice).await.unwrap().is_empty());
+
+        store
+            .record_login(Callsign::parse("M0ALICE").unwrap(), LoginTransport::Tcp)
+            .await
+            .unwrap();
+        store
+            .record_login(Callsign::parse("M0BOB").unwrap(), LoginTransport::Ax25)
+            .await
+            .unwrap();
+        let logins = store.recent_logins(10).await.unwrap();
+        assert_eq!(logins.len(), 2);
+        assert_eq!(logins[0].callsign.as_str(), "M0BOB");
+        assert_eq!(logins[0].transport, LoginTransport::Ax25);
+        assert_eq!(logins[1].transport, LoginTransport::Tcp);
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite3-wal"));

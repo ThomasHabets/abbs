@@ -3,12 +3,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     callsign::Callsign,
-    store::{MailStore, Message},
+    store::{LoginTransport, MailStore, Message},
     terminal::Terminal,
 };
 
 const MAX_SUBJECT_CHARS: usize = 80;
 const MAX_BODY_CHARS: usize = 4_000;
+const RECENT_LOGIN_LIMIT: usize = 10;
 
 pub async fn run_session<S>(
     mut terminal: Terminal<S>,
@@ -46,10 +47,13 @@ where
         match command.as_str() {
             "HELP" if fields.next().is_none() => write_help(&mut terminal).await?,
             "LIST" if fields.next().is_none() => {
-                list_messages(&mut terminal, &store, identity.clone()).await?
+                list_messages(&mut terminal, &store, identity.clone()).await?;
             }
             "SENT" if fields.next().is_none() => {
-                list_sent_messages(&mut terminal, &store, identity.clone()).await?
+                list_sent_messages(&mut terminal, &store, identity.clone()).await?;
+            }
+            "LOGINS" if fields.next().is_none() => {
+                list_recent_logins(&mut terminal, &store).await?;
             }
             "READ" => {
                 let Some(id) = fields.next() else {
@@ -62,12 +66,12 @@ where
                 }
                 match id.parse::<i64>() {
                     Ok(id) if id > 0 => {
-                        read_message(&mut terminal, &store, identity.clone(), id).await?
+                        read_message(&mut terminal, &store, identity.clone(), id).await?;
                     }
                     _ => {
                         terminal
                             .write_line("Message ID must be a positive number.")
-                            .await?
+                            .await?;
                     }
                 }
             }
@@ -82,12 +86,12 @@ where
                 }
                 match id.parse::<i64>() {
                     Ok(id) if id > 0 => {
-                        delete_message(&mut terminal, &store, identity.clone(), id).await?
+                        delete_message(&mut terminal, &store, identity.clone(), id).await?;
                     }
                     _ => {
                         terminal
                             .write_line("Message ID must be a positive number.")
-                            .await?
+                            .await?;
                     }
                 }
             }
@@ -110,7 +114,7 @@ where
             _ => {
                 terminal
                     .write_line("Unknown command. Type HELP for commands.")
-                    .await?
+                    .await?;
             }
         }
     }
@@ -128,6 +132,9 @@ where
         .write_line("  SENT                 List messages you sent")
         .await?;
     terminal
+        .write_line("  LOGINS               List the 10 most recent logins")
+        .await?;
+    terminal
         .write_line("  READ <id>            Read a visible message")
         .await?;
     terminal
@@ -142,6 +149,32 @@ where
     terminal
         .write_line("  QUIT                 Disconnect")
         .await?;
+    Ok(())
+}
+
+async fn list_recent_logins<S>(terminal: &mut Terminal<S>, store: &MailStore) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let logins = store.recent_logins(RECENT_LOGIN_LIMIT).await?;
+    if logins.is_empty() {
+        terminal.write_line("No logins recorded.").await?;
+        return Ok(());
+    }
+
+    terminal.write_line("Recent logins:").await?;
+    for login in logins {
+        let transport = match login.transport {
+            LoginTransport::Tcp => "TCP",
+            LoginTransport::Ax25 => "AX.25",
+        };
+        terminal
+            .write_line(&format!(
+                "{} via {transport} at {}",
+                login.callsign, login.logged_in_at
+            ))
+            .await?;
+    }
     Ok(())
 }
 
