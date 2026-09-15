@@ -26,6 +26,7 @@ pub struct BbsConfig {
     pub callsign: Callsign,
     pub database_path: std::path::PathBuf,
     pub files_dir: std::path::PathBuf,
+    pub uploads_dir: Option<std::path::PathBuf>,
     pub tcp_listen: SocketAddr,
     pub agw_addr: String,
     pub agw_port: u8,
@@ -65,6 +66,10 @@ impl BbsHandle {
 pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
     let store = MailStore::open(config.database_path.clone()).await?;
     let files = FileArea::open(config.files_dir.clone()).await?;
+    let uploads = match config.uploads_dir.clone() {
+        Some(path) => FileArea::open(path).await?,
+        None => files.clone(),
+    };
     let tcp_listener = TcpListener::bind(config.tcp_listen)
         .await
         .with_context(|| format!("failed to bind TCP listener at {}", config.tcp_listen))?;
@@ -76,9 +81,16 @@ pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
         config.clone(),
         store.clone(),
         files.clone(),
+        uploads.clone(),
         shutdown.subscribe(),
     ));
-    let agw_task = tokio::spawn(agw_supervisor(config, store, files, shutdown.subscribe()));
+    let agw_task = tokio::spawn(agw_supervisor(
+        config,
+        store,
+        files,
+        uploads,
+        shutdown.subscribe(),
+    ));
 
     Ok(BbsHandle {
         tcp_addr,
@@ -92,6 +104,7 @@ async fn tcp_listener_loop(
     config: BbsConfig,
     store: MailStore,
     files: FileArea,
+    uploads: FileArea,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     let mut sessions = JoinSet::new();
@@ -103,8 +116,9 @@ async fn tcp_listener_loop(
                     let config = config.clone();
                     let store = store.clone();
                     let files = files.clone();
+                    let uploads = uploads.clone();
                     sessions.spawn(async move {
-                        if let Err(error) = Box::pin(handle_tcp_session(stream, config, store, files)).await {
+                        if let Err(error) = Box::pin(handle_tcp_session(stream, config, store, files, uploads)).await {
                             warn!("TCP session ended with error: {error:#}");
                         }
                     });
@@ -128,6 +142,7 @@ async fn handle_tcp_session(
     config: BbsConfig,
     store: MailStore,
     files: FileArea,
+    uploads: FileArea,
 ) -> Result<()> {
     let mut terminal = Terminal::new(stream);
     terminal
@@ -153,6 +168,7 @@ async fn handle_tcp_session(
                     config.callsign,
                     store,
                     files,
+                    uploads,
                     false,
                 ))
                 .await;
@@ -177,13 +193,14 @@ async fn agw_supervisor(
     config: BbsConfig,
     store: MailStore,
     files: FileArea,
+    uploads: FileArea,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     loop {
         let listener_shutdown = shutdown.resubscribe();
         let result = tokio::select! {
             _ = shutdown.recv() => return,
-            result = run_agw_listener(config.clone(), store.clone(), files.clone(), listener_shutdown) => result,
+            result = run_agw_listener(config.clone(), store.clone(), files.clone(), uploads.clone(), listener_shutdown) => result,
         };
         match result {
             Ok(()) => warn!("AGW listener stopped; retrying in five seconds"),
@@ -200,6 +217,7 @@ async fn run_agw_listener(
     config: BbsConfig,
     store: MailStore,
     files: FileArea,
+    uploads: FileArea,
     mut shutdown: broadcast::Receiver<()>,
 ) -> Result<()> {
     let agw = AGW::new(&config.agw_addr)
@@ -227,12 +245,13 @@ async fn run_agw_listener(
                 let bbs_callsign = config.callsign.clone();
                 let store = store.clone();
                 let files = files.clone();
+                let uploads = uploads.clone();
                 sessions.push(Box::pin(async move {
                     if let Err(error) = store.record_login(remote.clone(), LoginTransport::Ax25).await {
                         warn!("failed to record AX.25 login: {error:#}");
                         return;
                     }
-                    if let Err(error) = Box::pin(run_session(Terminal::new(connection), remote, bbs_callsign, store, files, true)).await {
+                    if let Err(error) = Box::pin(run_session(Terminal::new(connection), remote, bbs_callsign, store, files, uploads, true)).await {
                         warn!("AX.25 session ended with error: {error:#}");
                     }
                 }));

@@ -27,6 +27,7 @@ pub async fn run_session<S>(
     bbs_callsign: Callsign,
     store: MailStore,
     files: FileArea,
+    uploads: FileArea,
     show_bbs_welcome: bool,
 ) -> Result<()>
 where
@@ -60,7 +61,7 @@ where
         let line = match input {
             TerminalInput::Line(line) => line,
             TerminalInput::Zmodem(initial) => {
-                write_prompt = match receive_zmodem(&mut terminal, &files, initial).await {
+                write_prompt = match receive_zmodem(&mut terminal, &uploads, initial).await {
                     Ok(()) => {
                         // A ZMODEM sender answers the receiver's final ZFIN
                         // with `OO`.  Consume it before resuming line input:

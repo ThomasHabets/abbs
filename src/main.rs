@@ -19,6 +19,10 @@ struct Cli {
     #[arg(long, default_value = "files")]
     files_dir: PathBuf,
 
+    /// Directory for received ZMODEM uploads. Defaults to --files-dir.
+    #[arg(long)]
+    uploads_dir: Option<PathBuf>,
+
     /// TCP address for terminal clients.
     #[arg(long, default_value = "0.0.0.0:8000")]
     tcp_listen: SocketAddr,
@@ -40,6 +44,7 @@ async fn main() -> Result<()> {
         callsign: Callsign::parse(&cli.callsign)?,
         database_path: cli.db,
         files_dir: cli.files_dir,
+        uploads_dir: cli.uploads_dir,
         tcp_listen: cli.tcp_listen,
         agw_addr: cli.agw_addr,
         agw_port: cli.agw_port,

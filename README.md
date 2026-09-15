@@ -27,6 +27,9 @@ stays available when the AGWPE endpoint is offline; the radio listener retries
 every five seconds.
 
 Files offered for download are placed in the `files` directory by default.
+Incoming ZMODEM uploads use that same directory by default. To hold uploads
+for review before making them downloadable, start ABBS with a separate
+directory, for example `--uploads-dir uploads`.
 
 ```text
 Usage: abbs [OPTIONS] --callsign <CALLSIGN>
@@ -35,6 +38,7 @@ Options:
 --callsign <CALLSIGN>      BBS callsign (required)
 --db <PATH>                SQLite database path [default: abbs.sqlite3]
 --files-dir <PATH>         Directory containing downloadable files [default: files]
+--uploads-dir <PATH>       Directory for received ZMODEM uploads [default: files-dir]
 --tcp-listen <ADDRESS>     TCP bind address [default: 0.0.0.0:8000]
 --agw-addr <ADDRESS>       AGWPE/Direwolf endpoint [default: 127.0.0.1:8010]
 --agw-port <NUMBER>        AGWPE radio port [default: 1]
@@ -88,6 +92,12 @@ After a successful transfer the BBS deliberately sends no completion text or
 prompt, so that it cannot be mistaken for the final ZMODEM frame by the
 client's `rz`. Send the next command normally once the client reports that the
 transfer has finished.
+
+Clients may also initiate a ZMODEM upload without a BBS command. Uploaded
+files have safe single-component filenames only, cannot overwrite an existing
+file, and are limited to 256 MiB each. `--uploads-dir` stores them separately
+from the files advertised by `FILES` and `DOWNLOAD`; move reviewed uploads into
+`--files-dir` when they should become available for download.
 
 ## Identity and privacy
 

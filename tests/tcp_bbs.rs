@@ -239,12 +239,19 @@ fn database_path() -> PathBuf {
 }
 
 async fn start_test_bbs() -> Result<(BbsHandle, PathBuf, PathBuf)> {
+    start_test_bbs_with_uploads(None).await
+}
+
+async fn start_test_bbs_with_uploads(
+    uploads_dir: Option<PathBuf>,
+) -> Result<(BbsHandle, PathBuf, PathBuf)> {
     let database_path = database_path();
     let files_dir = database_path.with_extension("files");
     let bbs = start(BbsConfig {
         callsign: Callsign::parse("M0BBS")?,
         database_path: database_path.clone(),
         files_dir: files_dir.clone(),
+        uploads_dir,
         tcp_listen: "127.0.0.1:0".parse()?,
         // No AGW server is needed for TCP functionality; the BBS must remain
         // available while its radio listener retries.
@@ -400,15 +407,18 @@ async fn successful_download_stays_silent_until_the_next_command() -> Result<()>
 
 #[tokio::test]
 async fn tcp_client_zmodem_uploads_a_file_and_returns_to_commands() -> Result<()> {
-    let (bbs, database_path, files_dir) = start_test_bbs().await?;
+    let uploads_dir = database_path().with_extension("uploads");
+    let (bbs, database_path, files_dir) =
+        start_test_bbs_with_uploads(Some(uploads_dir.clone())).await?;
     let test_result = async {
         let mut client = Client::connect(bbs.tcp_addr(), "m0alice", b"\r\n").await?;
 
         send_zmodem_upload(&mut client, b"uplink.txt", b"CQ from ZMODEM").await?;
-        assert_eq!(fs::read(files_dir.join("uplink.txt"))?, b"CQ from ZMODEM");
+        assert_eq!(fs::read(uploads_dir.join("uplink.txt"))?, b"CQ from ZMODEM");
+        assert!(!files_dir.join("uplink.txt").exists());
         let files = client.command("FILES").await?;
         anyhow::ensure!(
-            files.contains("uplink.txt (14 bytes)"),
+            files.contains("No files available."),
             "unexpected FILES response: {files:?}"
         );
         Ok(())
@@ -418,6 +428,7 @@ async fn tcp_client_zmodem_uploads_a_file_and_returns_to_commands() -> Result<()
     let shutdown_result = bbs.shutdown().await;
     remove_database(&database_path);
     let _ = fs::remove_dir_all(files_dir);
+    let _ = fs::remove_dir_all(uploads_dir);
     shutdown_result?;
     test_result
 }
