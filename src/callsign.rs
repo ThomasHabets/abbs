@@ -29,6 +29,19 @@ impl Callsign {
             .map_or(self.as_str(), |(base, _)| base)
     }
 
+    /// Return this callsign's base with the supplied AX.25 SSID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `ssid` is outside the AX.25 range or the result
+    /// cannot be represented by AGW.
+    pub fn with_ssid(&self, ssid: u8) -> Result<Self> {
+        if ssid > 15 {
+            bail!("SSID must be between 0 and 15");
+        }
+        Self::parse(&format!("{}-{ssid}", self.base()))
+    }
+
     /// Convert this callsign to the representation required by AGW.
     ///
     /// # Errors
@@ -72,6 +85,15 @@ mod tests {
         assert_eq!(Callsign::parse(" m0abc-7 ").unwrap().as_str(), "M0ABC-7");
         assert_eq!(Callsign::parse("m0abc-7").unwrap().base(), "M0ABC");
         assert_eq!(Callsign::parse("m0abc").unwrap().base(), "M0ABC");
+        assert_eq!(
+            Callsign::parse("m0abc-7")
+                .unwrap()
+                .with_ssid(2)
+                .unwrap()
+                .as_str(),
+            "M0ABC-2"
+        );
+        assert!(Callsign::parse("m0abc").unwrap().with_ssid(16).is_err());
         assert!(Callsign::parse("").is_err());
         assert!(Callsign::parse("M0 ABC").is_err());
         assert!(Callsign::parse("TOO-LONG-11").is_err());

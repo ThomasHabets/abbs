@@ -1,8 +1,10 @@
-use std::{io::SeekFrom, path::Path, str::SplitWhitespace};
+use std::{collections::HashSet, io::SeekFrom, path::Path, str::SplitWhitespace, sync::Arc};
 
+use agw::{Call, Pid, r#async::AGW};
 use anyhow::{Context, Result, bail};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
+    sync::{Mutex, watch},
     time::{Duration, Instant, timeout},
 };
 use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
@@ -21,10 +23,79 @@ const ZMODEM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const ZMODEM_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_UPLOAD_BYTES: u32 = 256 * 1024 * 1024;
 
+/// A live AGW endpoint and the dynamically registered source callsigns it
+/// owns. The cache is scoped to one AGW TCP connection and is discarded when
+/// the supervisor reconnects.
+pub(crate) struct AgwEndpoint {
+    agw: Arc<AGW>,
+    port: agw::Port,
+    via: Call,
+    registered: Mutex<HashSet<Call>>,
+}
+
+impl AgwEndpoint {
+    #[must_use]
+    pub(crate) fn new(agw: Arc<AGW>, port: agw::Port, via: Call) -> Self {
+        Self {
+            agw,
+            port,
+            via,
+            registered: Mutex::new(HashSet::new()),
+        }
+    }
+
+    async fn connect(
+        &self,
+        source: &Call,
+        destination: &Call,
+    ) -> Result<agw::r#async::Connection<'_>> {
+        let mut registered = self.registered.lock().await;
+        if registered.insert(source.clone())
+            && let Err(error) = self.agw.register_callsign(self.port, source).await
+        {
+            registered.remove(source);
+            return Err(error.into());
+        }
+        drop(registered);
+
+        self.agw
+            .connect(
+                self.port,
+                Pid(0xf0),
+                source,
+                destination,
+                std::slice::from_ref(&self.via),
+            )
+            .await
+            .context("outgoing AX.25 connection failed")
+    }
+}
+
+/// Access to the currently connected AGW endpoint.
+#[derive(Clone)]
+pub(crate) struct OutboundConnector {
+    endpoint: watch::Receiver<Option<Arc<AgwEndpoint>>>,
+}
+
+impl OutboundConnector {
+    #[must_use]
+    pub(crate) fn new(endpoint: watch::Receiver<Option<Arc<AgwEndpoint>>>) -> Self {
+        Self { endpoint }
+    }
+
+    fn active(&self) -> Result<Arc<AgwEndpoint>> {
+        self.endpoint
+            .borrow()
+            .clone()
+            .context("AGW is currently unavailable")
+    }
+}
+
 pub(crate) struct SessionOptions {
     pub prompt: String,
     pub body_prompt: String,
     pub show_bbs_welcome: bool,
+    pub outbound: Option<OutboundConnector>,
 }
 
 pub async fn run_session<S>(
@@ -109,6 +180,21 @@ where
             }
             "READ" => read_command(&mut terminal, &store, &identity, &mut fields).await?,
             "DELETE" => delete_command(&mut terminal, &store, &identity, &mut fields).await?,
+            "CONNECT" => {
+                if matches!(
+                    connect_command(
+                        &mut terminal,
+                        &identity,
+                        &mut fields,
+                        options.outbound.as_ref(),
+                    )
+                    .await?,
+                    ConnectExit::ClientDisconnected
+                ) {
+                    terminal.shutdown().await?;
+                    return Ok(());
+                }
+            }
             "SEND" => {
                 send_command(
                     &mut terminal,
@@ -129,6 +215,136 @@ where
                     .write_line("Unknown command. Type HELP for commands.")
                     .await?;
             }
+        }
+    }
+}
+
+enum ConnectExit {
+    Continue,
+    ClientDisconnected,
+}
+
+async fn connect_command<S>(
+    terminal: &mut Terminal<S>,
+    identity: &Callsign,
+    fields: &mut SplitWhitespace<'_>,
+    outbound: Option<&OutboundConnector>,
+) -> Result<ConnectExit>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(destination) = fields.next() else {
+        terminal
+            .write_line("Usage: CONNECT <destination> <ssid>")
+            .await?;
+        return Ok(ConnectExit::Continue);
+    };
+    let Some(ssid) = fields.next() else {
+        terminal
+            .write_line("Usage: CONNECT <destination> <ssid>")
+            .await?;
+        return Ok(ConnectExit::Continue);
+    };
+    if fields.next().is_some() {
+        terminal
+            .write_line("Usage: CONNECT <destination> <ssid>")
+            .await?;
+        return Ok(ConnectExit::Continue);
+    }
+
+    let destination = match Callsign::parse(destination) {
+        Ok(destination) => destination,
+        Err(error) => {
+            terminal
+                .write_line(&format!("Invalid destination callsign: {error}"))
+                .await?;
+            return Ok(ConnectExit::Continue);
+        }
+    };
+    let ssid = match ssid.parse::<u8>() {
+        Ok(ssid) if ssid <= 15 => ssid,
+        _ => {
+            terminal
+                .write_line("SSID must be a number from 0 to 15.")
+                .await?;
+            return Ok(ConnectExit::Continue);
+        }
+    };
+    let source = identity.with_ssid(ssid)?;
+    let Some(outbound) = outbound else {
+        terminal
+            .write_line("CONNECT is disabled for TCP clients.")
+            .await?;
+        return Ok(ConnectExit::Continue);
+    };
+    let endpoint = match outbound.active() {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            terminal
+                .write_line(&format!("Cannot connect: {error}"))
+                .await?;
+            return Ok(ConnectExit::Continue);
+        }
+    };
+    let source_call = source.to_agw_call()?;
+    let destination_call = destination.to_agw_call()?;
+    terminal
+        .write_line(&format!("Connecting {source} to {destination}..."))
+        .await?;
+    let mut remote = match endpoint.connect(&source_call, &destination_call).await {
+        Ok(remote) => remote,
+        Err(error) => {
+            terminal
+                .write_line(&format!("Connection failed: {error:#}"))
+                .await?;
+            return Ok(ConnectExit::Continue);
+        }
+    };
+
+    terminal
+        .write_line("Connected. Enter ~. on a line by itself to return here.")
+        .await?;
+    bridge_remote_bbs(terminal, &mut remote).await
+}
+
+async fn bridge_remote_bbs<S>(
+    terminal: &mut Terminal<S>,
+    remote: &mut agw::r#async::Connection<'_>,
+) -> Result<ConnectExit>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut remote_data = [0_u8; 1024];
+    loop {
+        tokio::select! {
+            line = terminal.read_line() => match line? {
+                Some(line) if line == "~." => {
+                    remote.shutdown().await.context("disconnecting remote BBS failed")?;
+                    terminal.write_line("Disconnected from remote BBS.").await?;
+                    return Ok(ConnectExit::Continue);
+                }
+                Some(line) => {
+                    let mut output = line.into_bytes();
+                    output.push(b'\r');
+                    remote.write_all(&output).await?;
+                    remote.flush().await?;
+                }
+                None => {
+                    let _ = remote.shutdown().await;
+                    return Ok(ConnectExit::ClientDisconnected);
+                }
+            },
+            read = remote.read(&mut remote_data) => match read {
+                Ok(0) => {
+                    terminal.write_line("Remote BBS disconnected.").await?;
+                    return Ok(ConnectExit::Continue);
+                }
+                Ok(read) => terminal.write_bytes(&remote_data[..read]).await?,
+                Err(error) => {
+                    terminal.write_line(&format!("Remote BBS error: {error}")).await?;
+                    return Ok(ConnectExit::Continue);
+                }
+            },
         }
     }
 }
@@ -345,6 +561,9 @@ where
         .await?;
     terminal
         .write_line("  DOWNLOAD <file>      Download a file using ZMODEM")
+        .await?;
+    terminal
+        .write_line("  CONNECT <call> <ssid> Connect to a remote BBS over AX.25")
         .await?;
     terminal
         .write_line("  READ <id>            Read a visible message")

@@ -1,4 +1,4 @@
-use std::{future::Future, net::SocketAddr, pin::Pin, time::Duration};
+use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
 use agw::{Port, r#async::AGW};
 use anyhow::{Context, Result};
@@ -6,7 +6,7 @@ use futures_util::{StreamExt, stream::FuturesUnordered};
 use log::{error, info, warn};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::broadcast,
+    sync::{broadcast, watch},
     task::{JoinHandle, JoinSet},
     time::sleep,
 };
@@ -14,7 +14,7 @@ use tokio::{
 use crate::{
     callsign::Callsign,
     files::FileArea,
-    session::{SessionOptions, run_session},
+    session::{AgwEndpoint, OutboundConnector, SessionOptions, run_session},
     store::{LoginTransport, MailStore},
     terminal::Terminal,
 };
@@ -29,6 +29,7 @@ pub struct BbsConfig {
     pub uploads_dir: Option<std::path::PathBuf>,
     pub prompt: String,
     pub body_prompt: String,
+    pub allow_tcp_connect: bool,
     pub tcp_listen: SocketAddr,
     pub agw_addr: String,
     pub agw_port: u8,
@@ -77,6 +78,7 @@ pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
         .with_context(|| format!("failed to bind TCP listener at {}", config.tcp_listen))?;
     let tcp_addr = tcp_listener.local_addr()?;
     let (shutdown, _) = broadcast::channel(1);
+    let (agw_endpoint, agw_endpoint_rx) = watch::channel(None);
 
     let tcp_task = tokio::spawn(tcp_listener_loop(
         tcp_listener,
@@ -84,6 +86,7 @@ pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
         store.clone(),
         files.clone(),
         uploads.clone(),
+        agw_endpoint_rx,
         shutdown.subscribe(),
     ));
     let agw_task = tokio::spawn(agw_supervisor(
@@ -91,6 +94,7 @@ pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
         store,
         files,
         uploads,
+        agw_endpoint,
         shutdown.subscribe(),
     ));
 
@@ -107,6 +111,7 @@ async fn tcp_listener_loop(
     store: MailStore,
     files: FileArea,
     uploads: FileArea,
+    agw_endpoint: watch::Receiver<Option<Arc<AgwEndpoint>>>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     let mut sessions = JoinSet::new();
@@ -119,8 +124,9 @@ async fn tcp_listener_loop(
                     let store = store.clone();
                     let files = files.clone();
                     let uploads = uploads.clone();
+                    let agw_endpoint = agw_endpoint.clone();
                     sessions.spawn(async move {
-                        if let Err(error) = Box::pin(handle_tcp_session(stream, config, store, files, uploads)).await {
+                        if let Err(error) = Box::pin(handle_tcp_session(stream, config, store, files, uploads, agw_endpoint)).await {
                             warn!("TCP session ended with error: {error:#}");
                         }
                     });
@@ -145,6 +151,7 @@ async fn handle_tcp_session(
     store: MailStore,
     files: FileArea,
     uploads: FileArea,
+    agw_endpoint: watch::Receiver<Option<Arc<AgwEndpoint>>>,
 ) -> Result<()> {
     let mut terminal = Terminal::new(stream);
     terminal
@@ -175,6 +182,9 @@ async fn handle_tcp_session(
                         prompt: config.prompt,
                         body_prompt: config.body_prompt,
                         show_bbs_welcome: false,
+                        outbound: config
+                            .allow_tcp_connect
+                            .then(|| OutboundConnector::new(agw_endpoint)),
                     },
                 ))
                 .await;
@@ -200,14 +210,16 @@ async fn agw_supervisor(
     store: MailStore,
     files: FileArea,
     uploads: FileArea,
+    agw_endpoint: watch::Sender<Option<Arc<AgwEndpoint>>>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     loop {
         let listener_shutdown = shutdown.resubscribe();
         let result = tokio::select! {
             _ = shutdown.recv() => return,
-            result = run_agw_listener(config.clone(), store.clone(), files.clone(), uploads.clone(), listener_shutdown) => result,
+            result = run_agw_listener(config.clone(), store.clone(), files.clone(), uploads.clone(), agw_endpoint.clone(), listener_shutdown) => result,
         };
+        agw_endpoint.send_replace(None);
         match result {
             Ok(()) => warn!("AGW listener stopped; retrying in five seconds"),
             Err(error) => warn!("AGW listener stopped: {error:#}; retrying in five seconds"),
@@ -224,16 +236,24 @@ async fn run_agw_listener(
     store: MailStore,
     files: FileArea,
     uploads: FileArea,
+    agw_endpoint: watch::Sender<Option<Arc<AgwEndpoint>>>,
     mut shutdown: broadcast::Receiver<()>,
 ) -> Result<()> {
-    let agw = AGW::new(&config.agw_addr)
-        .await
-        .with_context(|| format!("failed to connect to AGW at {}", config.agw_addr))?;
+    let agw = Arc::new(
+        AGW::new(&config.agw_addr)
+            .await
+            .with_context(|| format!("failed to connect to AGW at {}", config.agw_addr))?,
+    );
     let bbs_call = config.callsign.to_agw_call()?;
     let mut listener = agw
         .listen(Port(config.agw_port), &bbs_call)
         .await
         .context("failed to listen for AX.25 connections")?;
+    agw_endpoint.send_replace(Some(Arc::new(AgwEndpoint::new(
+        Arc::clone(&agw),
+        Port(config.agw_port),
+        bbs_call,
+    ))));
     info!(
         "listening for AX.25 connections to {} on AGW {} port {}",
         config.callsign, config.agw_addr, config.agw_port
@@ -254,6 +274,7 @@ async fn run_agw_listener(
                 let store = store.clone();
                 let files = files.clone();
                 let uploads = uploads.clone();
+                let outbound = OutboundConnector::new(agw_endpoint.subscribe());
                 sessions.push(Box::pin(async move {
                     if let Err(error) = store.record_login(remote.clone(), LoginTransport::Ax25).await {
                         warn!("failed to record AX.25 login: {error:#}");
@@ -270,6 +291,7 @@ async fn run_agw_listener(
                             prompt,
                             body_prompt,
                             show_bbs_welcome: true,
+                            outbound: Some(outbound),
                         },
                     )).await {
                         warn!("AX.25 session ended with error: {error:#}");

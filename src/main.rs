@@ -31,6 +31,10 @@ struct Cli {
     #[arg(long, default_value = "> ")]
     body_prompt: String,
 
+    /// Allow TCP clients to create outgoing AX.25 BBS connections.
+    #[arg(long)]
+    allow_tcp_connect: bool,
+
     /// TCP address for terminal clients.
     #[arg(long, default_value = "0.0.0.0:8000")]
     tcp_listen: SocketAddr,
@@ -55,6 +59,7 @@ async fn main() -> Result<()> {
         uploads_dir: cli.uploads_dir,
         prompt: cli.prompt,
         body_prompt: cli.body_prompt,
+        allow_tcp_connect: cli.allow_tcp_connect,
         tcp_listen: cli.tcp_listen,
         agw_addr: cli.agw_addr,
         agw_port: cli.agw_port,

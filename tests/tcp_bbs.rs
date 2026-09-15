@@ -7,10 +7,12 @@ use std::{
 };
 
 use abbs::{BbsConfig, BbsHandle, Callsign, start};
+use agw::{Call, Packet, Pid, Port, r#async::AGWServer};
 use anyhow::{Context, Result, bail};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
     time::timeout,
 };
 use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
@@ -288,6 +290,7 @@ async fn start_test_bbs_with_options(
         uploads_dir,
         prompt,
         body_prompt,
+        allow_tcp_connect: false,
         tcp_listen: "127.0.0.1:0".parse()?,
         // No AGW server is needed for TCP functionality; the BBS must remain
         // available while its radio listener retries.
@@ -302,6 +305,136 @@ fn remove_database(path: &PathBuf) {
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
     let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+async fn serve_tcp_remote_bbs(
+    agw_listener: TcpListener,
+    bbs_call: Call,
+    source_call: Call,
+    destination_call: Call,
+    endpoint_ready_tx: oneshot::Sender<()>,
+) -> Result<()> {
+    let (stream, _) = agw_listener.accept().await?;
+    let mut server = AGWServer::new(stream);
+    let Packet::RegisterCallsign(port, call) = server.recv().await? else {
+        bail!("expected BBS callsign registration");
+    };
+    assert_eq!(port, Port(1));
+    assert_eq!(call, bbs_call);
+    server
+        .send(&Packet::RegisterCallsignReply {
+            port,
+            call,
+            success: true,
+        })
+        .await?;
+    let _ = endpoint_ready_tx.send(());
+
+    let Packet::RegisterCallsign(port, call) = server.recv().await? else {
+        bail!("expected outgoing callsign registration");
+    };
+    assert_eq!(port, Port(1));
+    assert_eq!(call, source_call);
+    server
+        .send(&Packet::RegisterCallsignReply {
+            port,
+            call,
+            success: true,
+        })
+        .await?;
+
+    let Packet::ConnectVia {
+        port,
+        pid,
+        src,
+        dst,
+        via,
+    } = server.recv().await?
+    else {
+        bail!("expected an outgoing ConnectVia request");
+    };
+    assert_eq!(port, Port(1));
+    assert_eq!(pid, Pid(0xf0));
+    assert_eq!(src, source_call);
+    assert_eq!(dst, destination_call);
+    assert_eq!(via, vec![bbs_call.clone()]);
+    server
+        .send(&Packet::ConnectionEstablished {
+            port,
+            pid,
+            src: destination_call.clone(),
+            dst: source_call.clone(),
+        })
+        .await?;
+
+    let Packet::Disconnect { src, dst, .. } = server.recv().await? else {
+        bail!("expected outgoing remote disconnect");
+    };
+    assert_eq!(src, source_call);
+    assert_eq!(dst, destination_call);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_connect_is_opt_in_and_uses_the_requested_ssid() -> Result<()> {
+    let agw_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let agw_addr = agw_listener.local_addr()?.to_string();
+    let (endpoint_ready_tx, endpoint_ready_rx) = oneshot::channel();
+    let fake_agw = tokio::spawn(serve_tcp_remote_bbs(
+        agw_listener,
+        "M0BBS".parse()?,
+        "M0ALICE-9".parse()?,
+        "M0DEST".parse()?,
+        endpoint_ready_tx,
+    ));
+
+    let database_path = database_path();
+    let files_dir = database_path.with_extension("files");
+    let bbs = start(BbsConfig {
+        callsign: Callsign::parse("M0BBS")?,
+        database_path: database_path.clone(),
+        files_dir: files_dir.clone(),
+        uploads_dir: None,
+        prompt: "> ".into(),
+        body_prompt: "> ".into(),
+        allow_tcp_connect: true,
+        tcp_listen: "127.0.0.1:0".parse()?,
+        agw_addr,
+        agw_port: 1,
+    })
+    .await?;
+
+    let test_result = async {
+        timeout(Duration::from_secs(2), endpoint_ready_rx)
+            .await
+            .context("AGW endpoint did not become ready")??;
+        let mut client = Client::connect(bbs.tcp_addr(), "m0alice", b"\r\n").await?;
+        client.send_line("CONNECT M0DEST 9").await?;
+        assert!(
+            client
+                .read_until(b"Connected. Enter ~. on a line by itself to return here.")
+                .await?
+                .contains("Connecting M0ALICE-9 to M0DEST...")
+        );
+        client.send_line("~.").await?;
+        assert!(
+            client
+                .read_until(b"> ")
+                .await?
+                .contains("Disconnected from remote BBS.")
+        );
+        timeout(Duration::from_secs(2), fake_agw)
+            .await
+            .context("fake AGW test did not finish")???;
+        Ok(())
+    }
+    .await;
+
+    let shutdown_result = bbs.shutdown().await;
+    remove_database(&database_path);
+    let _ = fs::remove_dir_all(files_dir);
+    shutdown_result?;
+    test_result
 }
 
 #[tokio::test]
@@ -322,6 +455,11 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
 
     let files = eve.command("FILES").await?;
     assert!(files.contains("bulletin.txt (5 bytes)"));
+    assert!(
+        eve.command("CONNECT M0DEST 1")
+            .await?
+            .contains("CONNECT is disabled for TCP clients.")
+    );
     assert!(
         eve.command("DOWNLOAD ../bulletin.txt")
             .await?
