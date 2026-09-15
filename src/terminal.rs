@@ -4,6 +4,12 @@ use anyhow::{Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 const MAX_LINE_BYTES: usize = 16 * 1024;
+const ZMODEM_START: &[u8] = b"**\x18B00";
+
+pub enum TerminalInput {
+    Line(String),
+    Zmodem(Vec<u8>),
+}
 
 /// A terminal adapter that accepts the line endings commonly used by radio and
 /// terminal clients, while always writing CRLF.
@@ -57,6 +63,33 @@ where
         }
     }
 
+    pub async fn read_input(&mut self) -> Result<Option<TerminalInput>> {
+        self.consume_optional_lf().await?;
+        let mut input = Vec::new();
+        loop {
+            let byte = {
+                let available = self.reader.fill_buf().await?;
+                if available.is_empty() {
+                    return if input.is_empty() {
+                        Ok(None)
+                    } else {
+                        decode_line(input).map(|line| Some(TerminalInput::Line(line)))
+                    };
+                }
+                available[0]
+            };
+            self.reader.consume(1);
+            if matches!(byte, b'\r' | b'\n') {
+                self.skip_optional_lf = byte == b'\r';
+                return decode_line(input).map(|line| Some(TerminalInput::Line(line)));
+            }
+            append_with_limit(&mut input, &[byte])?;
+            if input == ZMODEM_START {
+                return Ok(Some(TerminalInput::Zmodem(input)));
+            }
+        }
+    }
+
     pub async fn write(&mut self, text: &str) -> io::Result<()> {
         self.reader.get_mut().write_all(text.as_bytes()).await?;
         self.reader.get_mut().flush().await
@@ -85,6 +118,24 @@ where
             }
             return Ok(read);
         }
+    }
+
+    /// Consume the `OO` acknowledgement that a ZMODEM sender emits after the
+    /// receiver's final ZFIN.  Any bytes after it remain buffered for normal
+    /// terminal input, so a following command cannot become `OO<command>`.
+    pub async fn consume_zmodem_final_ack(&mut self) -> Result<bool> {
+        let available = self.reader.fill_buf().await?;
+        if available.is_empty() || available[0] != b'O' {
+            return Ok(false);
+        }
+        self.reader.consume(1);
+
+        let available = self.reader.fill_buf().await?;
+        if available.first() != Some(&b'O') {
+            bail!("invalid ZMODEM final acknowledgement");
+        }
+        self.reader.consume(1);
+        Ok(true)
     }
 
     pub async fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -165,5 +216,31 @@ mod tests {
         let mut buffer = [0; 16];
         let read = terminal.read_bytes(&mut buffer).await.unwrap();
         assert_eq!(&buffer[..read], b"ZMODEM");
+    }
+
+    #[tokio::test]
+    async fn detects_a_zmodem_header_before_line_decoding() {
+        let (mut client, server) = duplex(128);
+        client.write_all(b"**\x18B00rest").await.unwrap();
+
+        let mut terminal = Terminal::new(server);
+        let Some(super::TerminalInput::Zmodem(header)) = terminal.read_input().await.unwrap()
+        else {
+            panic!("ZMODEM header was not detected");
+        };
+        assert_eq!(header, b"**\x18B00");
+    }
+
+    #[tokio::test]
+    async fn zmodem_final_ack_does_not_prefix_the_next_command() {
+        let (mut client, server) = duplex(128);
+        client.write_all(b"OOFILES\r").await.unwrap();
+
+        let mut terminal = Terminal::new(server);
+        assert!(terminal.consume_zmodem_final_ack().await.unwrap());
+        assert_eq!(
+            terminal.read_line().await.unwrap().as_deref(),
+            Some("FILES")
+        );
     }
 }

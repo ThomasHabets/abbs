@@ -86,6 +86,15 @@ impl FileArea {
         .await
         .context("file-resolution task failed")?
     }
+
+    pub fn upload_paths(&self, name: &str) -> Result<(PathBuf, PathBuf)> {
+        if !is_safe_file_name(name) {
+            bail!("file name must be a single, non-whitespace path component");
+        }
+        let final_path = self.root.join(name);
+        let part_path = self.root.join(format!(".{name}.part"));
+        Ok((final_path, part_path))
+    }
 }
 
 fn is_safe_file_name(name: &str) -> bool {

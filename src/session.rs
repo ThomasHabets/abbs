@@ -2,16 +2,16 @@ use std::{io::SeekFrom, path::Path, str::SplitWhitespace};
 
 use anyhow::{Context, Result, bail};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite},
+    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     time::{Duration, Instant, timeout},
 };
-use zmodem2::{Action, Event, FileInfo, Position, Sender};
+use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
 
 use crate::{
     callsign::Callsign,
     files::FileArea,
     store::{LoginTransport, MailStore, Message},
-    terminal::Terminal,
+    terminal::{Terminal, TerminalInput},
 };
 
 const MAX_SUBJECT_CHARS: usize = 80;
@@ -19,6 +19,7 @@ const MAX_BODY_CHARS: usize = 4_000;
 const RECENT_LOGIN_LIMIT: usize = 10;
 const ZMODEM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const ZMODEM_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_UPLOAD_BYTES: u32 = 256 * 1024 * 1024;
 
 pub async fn run_session<S>(
     mut terminal: Terminal<S>,
@@ -52,9 +53,28 @@ where
             terminal.write("> ").await?;
         }
         write_prompt = true;
-        let Some(line) = terminal.read_line().await? else {
+        let Some(input) = terminal.read_input().await? else {
             terminal.shutdown().await?;
             return Ok(());
+        };
+        let line = match input {
+            TerminalInput::Line(line) => line,
+            TerminalInput::Zmodem(initial) => {
+                write_prompt = match receive_zmodem(&mut terminal, &files, initial).await {
+                    Ok(()) => {
+                        // A ZMODEM sender answers the receiver's final ZFIN
+                        // with `OO`.  Consume it before resuming line input:
+                        // it can otherwise arrive in the same TCP read as the
+                        // user's next command and turn `FILES` into `OOFILES`.
+                        let _ =
+                            timeout(Duration::from_secs(2), terminal.consume_zmodem_final_ack())
+                                .await;
+                        false
+                    }
+                    Err(_) => true,
+                };
+                continue;
+            }
         };
 
         let mut fields = line.split_whitespace();
@@ -93,6 +113,98 @@ where
                     .write_line("Unknown command. Type HELP for commands.")
                     .await?;
             }
+        }
+    }
+}
+
+struct UploadFile {
+    final_path: std::path::PathBuf,
+    part_path: std::path::PathBuf,
+    file: tokio::fs::File,
+}
+
+async fn receive_zmodem<S>(
+    terminal: &mut Terminal<S>,
+    files: &FileArea,
+    initial: Vec<u8>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut receiver = Receiver::new().context("failed to initialize ZMODEM receiver")?;
+    receiver.set_manual_file_accept(true);
+    let mut wire = initial;
+    let mut read_buffer = [0_u8; 8 * 1024];
+    let mut current: Option<UploadFile> = None;
+    let mut completed = false;
+
+    loop {
+        match receiver.poll() {
+            Action::WriteWire(bytes) => {
+                let bytes = bytes.to_vec();
+                terminal.write_bytes(&bytes).await?;
+                receiver.wire_written(bytes.len());
+            }
+            Action::WriteFile(bytes) => {
+                let bytes = bytes.to_vec();
+                let upload = current.as_mut().context("ZMODEM data without a file")?;
+                upload.file.write_all(&bytes).await?;
+                receiver
+                    .file_written(bytes.len())
+                    .map_err(anyhow::Error::msg)?;
+            }
+            Action::Event(Event::FileStarted(info)) => {
+                let Ok(name) = std::str::from_utf8(info.name) else {
+                    receiver.skip_file().map_err(anyhow::Error::msg)?;
+                    continue;
+                };
+                let size = info.size.map(Position::get);
+                let Ok((final_path, part_path)) = files.upload_paths(name) else {
+                    receiver.skip_file().map_err(anyhow::Error::msg)?;
+                    continue;
+                };
+                if size.is_none_or(|size| size > MAX_UPLOAD_BYTES)
+                    || tokio::fs::try_exists(&final_path).await?
+                    || tokio::fs::try_exists(&part_path).await?
+                {
+                    receiver.skip_file().map_err(anyhow::Error::msg)?;
+                    continue;
+                }
+                let file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&part_path)
+                    .await?;
+                receiver.accept_file_at(0).map_err(anyhow::Error::msg)?;
+                current = Some(UploadFile {
+                    final_path,
+                    part_path,
+                    file,
+                });
+            }
+            Action::Event(Event::FileCompleted) => {
+                let upload = current.take().context("ZMODEM completed unknown file")?;
+                upload.file.sync_all().await?;
+                tokio::fs::rename(&upload.part_path, &upload.final_path).await?;
+            }
+            Action::Event(Event::SessionCompleted) => completed = true,
+            Action::Event(Event::Aborted) => bail!("client aborted ZMODEM upload"),
+            Action::Event(_) => {}
+            Action::Idle if completed => return Ok(()),
+            Action::Idle => {
+                if !wire.is_empty() {
+                    let consumed = receiver.submit_wire(&wire).map_err(anyhow::Error::msg)?;
+                    if consumed != 0 {
+                        wire.drain(..consumed);
+                        continue;
+                    }
+                }
+                let read = terminal.read_bytes(&mut read_buffer).await?;
+                anyhow::ensure!(read != 0, "client disconnected during ZMODEM upload");
+                wire.extend_from_slice(&read_buffer[..read]);
+            }
+            Action::ReadFile { .. } => bail!("ZMODEM receiver requested source data"),
+            _ => bail!("unsupported ZMODEM receiver action"),
         }
     }
 }

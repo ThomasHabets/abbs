@@ -13,7 +13,7 @@ use tokio::{
     net::TcpStream,
     time::timeout,
 };
-use zmodem2::{Action, Event, Receiver};
+use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
 
@@ -168,6 +168,65 @@ async fn receive_zmodem_download(client: &mut Client, expected: &[u8]) -> Result
     }
 
     assert_eq!(received_file, expected);
+    Ok(())
+}
+
+async fn send_zmodem_upload(client: &mut Client, name: &[u8], contents: &[u8]) -> Result<()> {
+    let size = u32::try_from(contents.len()).context("upload test file is too large")?;
+    let mut sender = Sender::new().context("failed to initialize ZMODEM sender")?;
+    sender
+        .start_file(FileInfo::new(name, Some(Position::new(size))))
+        .context("failed to start ZMODEM upload")?;
+    let mut session_completed = false;
+
+    loop {
+        match sender.poll() {
+            Action::WriteWire(bytes) => {
+                let bytes = bytes.to_vec();
+                client.stream.write_all(&bytes).await?;
+                client.stream.flush().await?;
+                sender.wire_written(bytes.len());
+            }
+            Action::ReadFile { offset, max_len } => {
+                let offset = usize::try_from(offset.get())?;
+                let remaining = contents
+                    .get(offset..)
+                    .context("ZMODEM sender requested data beyond the test file")?;
+                let end = remaining.len().min(max_len);
+                anyhow::ensure!(end != 0, "ZMODEM sender requested empty source data");
+                sender
+                    .submit_file(&remaining[..end])
+                    .context("failed to provide ZMODEM upload data")?;
+            }
+            Action::Event(Event::FileCompleted) => {
+                sender.finish().context("failed to finish ZMODEM upload")?;
+            }
+            Action::Event(Event::SessionCompleted) => session_completed = true,
+            Action::Event(Event::Aborted) => bail!("BBS aborted ZMODEM upload"),
+            Action::Idle if session_completed => break,
+            Action::Idle => {
+                if !client.received.is_empty() {
+                    let consumed = sender
+                        .submit_wire(&client.received)
+                        .context("BBS sent invalid ZMODEM data")?;
+                    if consumed != 0 {
+                        client.received.drain(..consumed);
+                        continue;
+                    }
+                }
+
+                let mut buffer = [0_u8; 1024];
+                let read = timeout(Duration::from_secs(2), client.stream.read(&mut buffer))
+                    .await
+                    .context("timed out waiting for ZMODEM data")??;
+                anyhow::ensure!(read != 0, "BBS disconnected during ZMODEM upload");
+                client.received.extend_from_slice(&buffer[..read]);
+            }
+            Action::WriteFile(_) => bail!("ZMODEM sender unexpectedly requested file output"),
+            _ => bail!("ZMODEM sender returned an unsupported action"),
+        }
+    }
+
     Ok(())
 }
 
@@ -328,6 +387,30 @@ async fn successful_download_stays_silent_until_the_next_command() -> Result<()>
         }
 
         assert!(client.command("LIST").await?.contains("No messages."));
+        Ok(())
+    }
+    .await;
+
+    let shutdown_result = bbs.shutdown().await;
+    remove_database(&database_path);
+    let _ = fs::remove_dir_all(files_dir);
+    shutdown_result?;
+    test_result
+}
+
+#[tokio::test]
+async fn tcp_client_zmodem_uploads_a_file_and_returns_to_commands() -> Result<()> {
+    let (bbs, database_path, files_dir) = start_test_bbs().await?;
+    let test_result = async {
+        let mut client = Client::connect(bbs.tcp_addr(), "m0alice", b"\r\n").await?;
+
+        send_zmodem_upload(&mut client, b"uplink.txt", b"CQ from ZMODEM").await?;
+        assert_eq!(fs::read(files_dir.join("uplink.txt"))?, b"CQ from ZMODEM");
+        let files = client.command("FILES").await?;
+        anyhow::ensure!(
+            files.contains("uplink.txt (14 bytes)"),
+            "unexpected FILES response: {files:?}"
+        );
         Ok(())
     }
     .await;
