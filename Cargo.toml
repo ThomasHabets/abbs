@@ -9,7 +9,7 @@ description = "An amateur radio BBS"
 keywords = ["amateur", "radio", "bbs", "ax25"]
 
 [dependencies]
-agw = "0.8.0"
+agw = "0.8.2"
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
 env_logger = "0.11.8"
