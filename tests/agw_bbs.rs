@@ -92,6 +92,7 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
         database_path: database_path.clone(),
         files_dir: files_dir.clone(),
         uploads_dir: None,
+        prompt: "> ".into(),
         tcp_listen: "127.0.0.1:0".parse()?,
         agw_addr,
         agw_port: 1,

@@ -21,6 +21,7 @@ struct Client {
     stream: TcpStream,
     received: Vec<u8>,
     line_ending: &'static [u8],
+    prompt: Vec<u8>,
 }
 
 impl Client {
@@ -29,15 +30,25 @@ impl Client {
         callsign: &str,
         line_ending: &'static [u8],
     ) -> Result<Self> {
+        Self::connect_with_prompt(address, callsign, line_ending, b"> ").await
+    }
+
+    async fn connect_with_prompt(
+        address: SocketAddr,
+        callsign: &str,
+        line_ending: &'static [u8],
+        prompt: &[u8],
+    ) -> Result<Self> {
         let stream = TcpStream::connect(address).await?;
         let mut client = Self {
             stream,
             received: Vec::new(),
             line_ending,
+            prompt: prompt.to_vec(),
         };
         client.read_until(b"Callsign: ").await?;
         client.send_line(callsign).await?;
-        let greeting = client.read_until(b"> ").await?;
+        let greeting = client.read_until(prompt).await?;
         assert!(greeting.contains(&format!("Welcome, {}.", callsign.to_ascii_uppercase())));
         Ok(client)
     }
@@ -51,7 +62,8 @@ impl Client {
 
     async fn command(&mut self, command: &str) -> Result<String> {
         self.send_line(command).await?;
-        self.read_until(b"> ").await
+        let prompt = self.prompt.clone();
+        self.read_until(&prompt).await
     }
 
     async fn send_message(
@@ -245,6 +257,13 @@ async fn start_test_bbs() -> Result<(BbsHandle, PathBuf, PathBuf)> {
 async fn start_test_bbs_with_uploads(
     uploads_dir: Option<PathBuf>,
 ) -> Result<(BbsHandle, PathBuf, PathBuf)> {
+    start_test_bbs_with_options(uploads_dir, "> ".into()).await
+}
+
+async fn start_test_bbs_with_options(
+    uploads_dir: Option<PathBuf>,
+    prompt: String,
+) -> Result<(BbsHandle, PathBuf, PathBuf)> {
     let database_path = database_path();
     let files_dir = database_path.with_extension("files");
     let bbs = start(BbsConfig {
@@ -252,6 +271,7 @@ async fn start_test_bbs_with_uploads(
         database_path: database_path.clone(),
         files_dir: files_dir.clone(),
         uploads_dir,
+        prompt,
         tcp_listen: "127.0.0.1:0".parse()?,
         // No AGW server is needed for TCP functionality; the BBS must remain
         // available while its radio listener retries.
@@ -429,6 +449,25 @@ async fn tcp_client_zmodem_uploads_a_file_and_returns_to_commands() -> Result<()
     remove_database(&database_path);
     let _ = fs::remove_dir_all(files_dir);
     let _ = fs::remove_dir_all(uploads_dir);
+    shutdown_result?;
+    test_result
+}
+
+#[tokio::test]
+async fn tcp_client_uses_a_configured_prompt() -> Result<()> {
+    let (bbs, database_path, files_dir) =
+        start_test_bbs_with_options(None, "abbs> ".into()).await?;
+    let test_result = async {
+        let mut client =
+            Client::connect_with_prompt(bbs.tcp_addr(), "m0alice", b"\r\n", b"abbs> ").await?;
+        assert!(client.command("LIST").await?.contains("No messages."));
+        Ok(())
+    }
+    .await;
+
+    let shutdown_result = bbs.shutdown().await;
+    remove_database(&database_path);
+    let _ = fs::remove_dir_all(files_dir);
     shutdown_result?;
     test_result
 }

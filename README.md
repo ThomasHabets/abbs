@@ -39,6 +39,7 @@ Options:
 --db <PATH>                SQLite database path [default: abbs.sqlite3]
 --files-dir <PATH>         Directory containing downloadable files [default: files]
 --uploads-dir <PATH>       Directory for received ZMODEM uploads [default: files-dir]
+--prompt <TEXT>            Command and message-body prompt [default: > ]
 --tcp-listen <ADDRESS>     TCP bind address [default: 0.0.0.0:8000]
 --agw-addr <ADDRESS>       AGWPE/Direwolf endpoint [default: 127.0.0.1:8010]
 --agw-port <NUMBER>        AGWPE radio port [default: 1]

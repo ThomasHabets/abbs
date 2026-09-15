@@ -23,6 +23,10 @@ struct Cli {
     #[arg(long)]
     uploads_dir: Option<PathBuf>,
 
+    /// Prompt displayed before command and message-body input.
+    #[arg(long, default_value = "> ")]
+    prompt: String,
+
     /// TCP address for terminal clients.
     #[arg(long, default_value = "0.0.0.0:8000")]
     tcp_listen: SocketAddr,
@@ -45,6 +49,7 @@ async fn main() -> Result<()> {
         database_path: cli.db,
         files_dir: cli.files_dir,
         uploads_dir: cli.uploads_dir,
+        prompt: cli.prompt,
         tcp_listen: cli.tcp_listen,
         agw_addr: cli.agw_addr,
         agw_port: cli.agw_port,

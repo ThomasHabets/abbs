@@ -14,7 +14,7 @@ use tokio::{
 use crate::{
     callsign::Callsign,
     files::FileArea,
-    session::run_session,
+    session::{SessionOptions, run_session},
     store::{LoginTransport, MailStore},
     terminal::Terminal,
 };
@@ -27,6 +27,7 @@ pub struct BbsConfig {
     pub database_path: std::path::PathBuf,
     pub files_dir: std::path::PathBuf,
     pub uploads_dir: Option<std::path::PathBuf>,
+    pub prompt: String,
     pub tcp_listen: SocketAddr,
     pub agw_addr: String,
     pub agw_port: u8,
@@ -169,7 +170,10 @@ async fn handle_tcp_session(
                     store,
                     files,
                     uploads,
-                    false,
+                    SessionOptions {
+                        prompt: config.prompt,
+                        show_bbs_welcome: false,
+                    },
                 ))
                 .await;
             }
@@ -243,6 +247,7 @@ async fn run_agw_listener(
                 let remote = Callsign::parse(&connection.dst().to_string())
                     .context("AGW supplied an invalid remote callsign")?;
                 let bbs_callsign = config.callsign.clone();
+                let prompt = config.prompt.clone();
                 let store = store.clone();
                 let files = files.clone();
                 let uploads = uploads.clone();
@@ -251,7 +256,18 @@ async fn run_agw_listener(
                         warn!("failed to record AX.25 login: {error:#}");
                         return;
                     }
-                    if let Err(error) = Box::pin(run_session(Terminal::new(connection), remote, bbs_callsign, store, files, uploads, true)).await {
+                    if let Err(error) = Box::pin(run_session(
+                        Terminal::new(connection),
+                        remote,
+                        bbs_callsign,
+                        store,
+                        files,
+                        uploads,
+                        SessionOptions {
+                            prompt,
+                            show_bbs_welcome: true,
+                        },
+                    )).await {
                         warn!("AX.25 session ended with error: {error:#}");
                     }
                 }));

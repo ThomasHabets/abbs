@@ -21,6 +21,11 @@ const ZMODEM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const ZMODEM_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_UPLOAD_BYTES: u32 = 256 * 1024 * 1024;
 
+pub(crate) struct SessionOptions {
+    pub prompt: String,
+    pub show_bbs_welcome: bool,
+}
+
 pub async fn run_session<S>(
     mut terminal: Terminal<S>,
     identity: Callsign,
@@ -28,12 +33,12 @@ pub async fn run_session<S>(
     store: MailStore,
     files: FileArea,
     uploads: FileArea,
-    show_bbs_welcome: bool,
+    options: SessionOptions,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    if show_bbs_welcome {
+    if options.show_bbs_welcome {
         terminal
             .write_line(&format!("Welcome to {bbs_callsign} amateur radio BBS."))
             .await?;
@@ -51,7 +56,7 @@ where
     let mut write_prompt = true;
     loop {
         if write_prompt {
-            terminal.write("> ").await?;
+            terminal.write(&options.prompt).await?;
         }
         write_prompt = true;
         let Some(input) = terminal.read_input().await? else {
@@ -103,7 +108,16 @@ where
             }
             "READ" => read_command(&mut terminal, &store, &identity, &mut fields).await?,
             "DELETE" => delete_command(&mut terminal, &store, &identity, &mut fields).await?,
-            "SEND" => send_command(&mut terminal, &store, &identity, &mut fields).await?,
+            "SEND" => {
+                send_command(
+                    &mut terminal,
+                    &store,
+                    &identity,
+                    &mut fields,
+                    &options.prompt,
+                )
+                .await?;
+            }
             "QUIT" if fields.next().is_none() => {
                 terminal.write_line("Goodbye.").await?;
                 terminal.shutdown().await?;
@@ -295,6 +309,7 @@ async fn send_command<S>(
     store: &MailStore,
     identity: &Callsign,
     fields: &mut SplitWhitespace<'_>,
+    prompt: &str,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -307,7 +322,7 @@ where
         terminal.write_line("Usage: SEND <callsign|ALL>").await?;
         return Ok(());
     }
-    compose_message(terminal, store, identity.clone(), recipient).await
+    compose_message(terminal, store, identity.clone(), recipient, prompt).await
 }
 
 async fn write_help<S>(terminal: &mut Terminal<S>) -> Result<()>
@@ -628,6 +643,7 @@ async fn compose_message<S>(
     store: &MailStore,
     sender: Callsign,
     recipient_input: &str,
+    prompt: &str,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -670,7 +686,7 @@ where
     let mut lines = Vec::new();
     let mut character_count = 0;
     loop {
-        terminal.write("> ").await?;
+        terminal.write(prompt).await?;
         let Some(line) = terminal.read_line().await? else {
             return Ok(());
         };
