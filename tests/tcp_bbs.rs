@@ -22,6 +22,7 @@ struct Client {
     received: Vec<u8>,
     line_ending: &'static [u8],
     prompt: Vec<u8>,
+    body_prompt: Vec<u8>,
 }
 
 impl Client {
@@ -39,12 +40,23 @@ impl Client {
         line_ending: &'static [u8],
         prompt: &[u8],
     ) -> Result<Self> {
+        Self::connect_with_prompts(address, callsign, line_ending, prompt, b"> ").await
+    }
+
+    async fn connect_with_prompts(
+        address: SocketAddr,
+        callsign: &str,
+        line_ending: &'static [u8],
+        prompt: &[u8],
+        body_prompt: &[u8],
+    ) -> Result<Self> {
         let stream = TcpStream::connect(address).await?;
         let mut client = Self {
             stream,
             received: Vec::new(),
             line_ending,
             prompt: prompt.to_vec(),
+            body_prompt: body_prompt.to_vec(),
         };
         client.read_until(b"Callsign: ").await?;
         client.send_line(callsign).await?;
@@ -75,13 +87,15 @@ impl Client {
         self.send_line(&format!("SEND {recipient}")).await?;
         self.read_until(b"Subject: ").await?;
         self.send_line(subject).await?;
-        self.read_until(b"> ").await?;
+        let body_prompt = self.body_prompt.clone();
+        self.read_until(&body_prompt).await?;
         for line in body {
             self.send_line(line).await?;
-            self.read_until(b"> ").await?;
+            self.read_until(&body_prompt).await?;
         }
         self.send_line(".").await?;
-        self.read_until(b"> ").await
+        let prompt = self.prompt.clone();
+        self.read_until(&prompt).await
     }
 
     async fn read_until(&mut self, marker: &[u8]) -> Result<String> {
@@ -257,12 +271,13 @@ async fn start_test_bbs() -> Result<(BbsHandle, PathBuf, PathBuf)> {
 async fn start_test_bbs_with_uploads(
     uploads_dir: Option<PathBuf>,
 ) -> Result<(BbsHandle, PathBuf, PathBuf)> {
-    start_test_bbs_with_options(uploads_dir, "> ".into()).await
+    start_test_bbs_with_options(uploads_dir, "> ".into(), "> ".into()).await
 }
 
 async fn start_test_bbs_with_options(
     uploads_dir: Option<PathBuf>,
     prompt: String,
+    body_prompt: String,
 ) -> Result<(BbsHandle, PathBuf, PathBuf)> {
     let database_path = database_path();
     let files_dir = database_path.with_extension("files");
@@ -272,6 +287,7 @@ async fn start_test_bbs_with_options(
         files_dir: files_dir.clone(),
         uploads_dir,
         prompt,
+        body_prompt,
         tcp_listen: "127.0.0.1:0".parse()?,
         // No AGW server is needed for TCP functionality; the BBS must remain
         // available while its radio listener retries.
@@ -456,11 +472,18 @@ async fn tcp_client_zmodem_uploads_a_file_and_returns_to_commands() -> Result<()
 #[tokio::test]
 async fn tcp_client_uses_a_configured_prompt() -> Result<()> {
     let (bbs, database_path, files_dir) =
-        start_test_bbs_with_options(None, "abbs> ".into()).await?;
+        start_test_bbs_with_options(None, "abbs> ".into(), "body> ".into()).await?;
     let test_result = async {
         let mut client =
-            Client::connect_with_prompt(bbs.tcp_addr(), "m0alice", b"\r\n", b"abbs> ").await?;
-        assert!(client.command("LIST").await?.contains("No messages."));
+            Client::connect_with_prompts(bbs.tcp_addr(), "m0alice", b"\r\n", b"abbs> ", b"body> ")
+                .await?;
+        assert!(
+            client
+                .send_message("ALL", "Prompt test", &["message body"])
+                .await?
+                .contains("Message #1 saved.")
+        );
+        assert!(client.command("LIST").await?.contains("Prompt test"));
         Ok(())
     }
     .await;

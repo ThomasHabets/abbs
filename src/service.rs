@@ -28,6 +28,7 @@ pub struct BbsConfig {
     pub files_dir: std::path::PathBuf,
     pub uploads_dir: Option<std::path::PathBuf>,
     pub prompt: String,
+    pub body_prompt: String,
     pub tcp_listen: SocketAddr,
     pub agw_addr: String,
     pub agw_port: u8,
@@ -172,6 +173,7 @@ async fn handle_tcp_session(
                     uploads,
                     SessionOptions {
                         prompt: config.prompt,
+                        body_prompt: config.body_prompt,
                         show_bbs_welcome: false,
                     },
                 ))
@@ -248,6 +250,7 @@ async fn run_agw_listener(
                     .context("AGW supplied an invalid remote callsign")?;
                 let bbs_callsign = config.callsign.clone();
                 let prompt = config.prompt.clone();
+                let body_prompt = config.body_prompt.clone();
                 let store = store.clone();
                 let files = files.clone();
                 let uploads = uploads.clone();
@@ -265,6 +268,7 @@ async fn run_agw_listener(
                         uploads,
                         SessionOptions {
                             prompt,
+                            body_prompt,
                             show_bbs_welcome: true,
                         },
                     )).await {

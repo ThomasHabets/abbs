@@ -23,6 +23,7 @@ const MAX_UPLOAD_BYTES: u32 = 256 * 1024 * 1024;
 
 pub(crate) struct SessionOptions {
     pub prompt: String,
+    pub body_prompt: String,
     pub show_bbs_welcome: bool,
 }
 
@@ -114,7 +115,7 @@ where
                     &store,
                     &identity,
                     &mut fields,
-                    &options.prompt,
+                    &options.body_prompt,
                 )
                 .await?;
             }
