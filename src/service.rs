@@ -26,7 +26,6 @@ pub struct BbsConfig {
     pub callsign: Callsign,
     pub database_path: std::path::PathBuf,
     pub files_dir: std::path::PathBuf,
-    pub zmodem_sender: std::path::PathBuf,
     pub tcp_listen: SocketAddr,
     pub agw_addr: String,
     pub agw_port: u8,
@@ -154,7 +153,6 @@ async fn handle_tcp_session(
                     config.callsign,
                     store,
                     files,
-                    config.zmodem_sender,
                     false,
                 ))
                 .await;
@@ -227,7 +225,6 @@ async fn run_agw_listener(
                 let remote = Callsign::parse(&connection.dst().to_string())
                     .context("AGW supplied an invalid remote callsign")?;
                 let bbs_callsign = config.callsign.clone();
-                let zmodem_sender = config.zmodem_sender.clone();
                 let store = store.clone();
                 let files = files.clone();
                 sessions.push(Box::pin(async move {
@@ -235,7 +232,7 @@ async fn run_agw_listener(
                         warn!("failed to record AX.25 login: {error:#}");
                         return;
                     }
-                    if let Err(error) = Box::pin(run_session(Terminal::new(connection), remote, bbs_callsign, store, files, zmodem_sender, true)).await {
+                    if let Err(error) = Box::pin(run_session(Terminal::new(connection), remote, bbs_callsign, store, files, true)).await {
                         warn!("AX.25 session ended with error: {error:#}");
                     }
                 }));

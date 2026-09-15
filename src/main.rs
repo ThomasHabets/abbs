@@ -40,7 +40,6 @@ async fn main() -> Result<()> {
         callsign: Callsign::parse(&cli.callsign)?,
         database_path: cli.db,
         files_dir: cli.files_dir,
-        zmodem_sender: PathBuf::from("sz"),
         tcp_listen: cli.tcp_listen,
         agw_addr: cli.agw_addr,
         agw_port: cli.agw_port,

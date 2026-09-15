@@ -1,14 +1,11 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-    str::SplitWhitespace,
-};
+use std::{io::SeekFrom, path::Path, str::SplitWhitespace};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    process::Command,
+    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite},
+    time::{Duration, Instant, timeout},
 };
+use zmodem2::{Action, Event, FileInfo, Position, Sender};
 
 use crate::{
     callsign::Callsign,
@@ -20,6 +17,8 @@ use crate::{
 const MAX_SUBJECT_CHARS: usize = 80;
 const MAX_BODY_CHARS: usize = 4_000;
 const RECENT_LOGIN_LIMIT: usize = 10;
+const ZMODEM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const ZMODEM_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 pub async fn run_session<S>(
     mut terminal: Terminal<S>,
@@ -27,7 +26,6 @@ pub async fn run_session<S>(
     bbs_callsign: Callsign,
     store: MailStore,
     files: FileArea,
-    zmodem_sender: PathBuf,
     show_bbs_welcome: bool,
 ) -> Result<()>
 where
@@ -80,8 +78,7 @@ where
                 list_files(&mut terminal, &files).await?;
             }
             "DOWNLOAD" => {
-                write_prompt =
-                    download_command(&mut terminal, &files, &zmodem_sender, &mut fields).await?;
+                write_prompt = download_command(&mut terminal, &files, &mut fields).await?;
             }
             "READ" => read_command(&mut terminal, &store, &identity, &mut fields).await?,
             "DELETE" => delete_command(&mut terminal, &store, &identity, &mut fields).await?,
@@ -103,7 +100,6 @@ where
 async fn download_command<S>(
     terminal: &mut Terminal<S>,
     files: &FileArea,
-    zmodem_sender: &Path,
     fields: &mut SplitWhitespace<'_>,
 ) -> Result<bool>
 where
@@ -117,7 +113,7 @@ where
         terminal.write_line("Usage: DOWNLOAD <file>").await?;
         return Ok(true);
     }
-    Box::pin(download_file(terminal, files, zmodem_sender, name)).await
+    Box::pin(download_file(terminal, files, name)).await
 }
 
 async fn read_command<S>(
@@ -258,12 +254,7 @@ where
     Ok(())
 }
 
-async fn download_file<S>(
-    terminal: &mut Terminal<S>,
-    files: &FileArea,
-    zmodem_sender: &Path,
-    name: &str,
-) -> Result<bool>
+async fn download_file<S>(terminal: &mut Terminal<S>, files: &FileArea, name: &str) -> Result<bool>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -280,11 +271,8 @@ where
     };
 
     terminal.write_line("Starting ZMODEM download.").await?;
-    if Box::pin(send_zmodem(terminal, &path, zmodem_sender))
-        .await
-        .is_ok()
-    {
-        // Leave the wire silent after `sz` finishes.  The remote `rz` needs
+    if Box::pin(send_zmodem(terminal, &path, name)).await.is_ok() {
+        // Leave the wire silent after the sender finishes. The remote `rz` needs
         // to consume the last ZMODEM frame before the client sends its next
         // command, at which point the ordinary command response is safe.
         Ok(false)
@@ -294,59 +282,79 @@ where
     }
 }
 
-async fn send_zmodem<S>(terminal: &mut Terminal<S>, path: &Path, zmodem_sender: &Path) -> Result<()>
+async fn send_zmodem<S>(terminal: &mut Terminal<S>, path: &Path, name: &str) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut child = Command::new(zmodem_sender)
-        .arg("--binary")
-        .arg("--")
-        .arg(path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .context("failed to start sz")?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .context("sz did not provide standard input")?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .context("sz did not provide standard output")?;
-    let mut from_client = [0_u8; 8 * 1024];
-    let mut to_client = [0_u8; 8 * 1024];
-    let mut client_closed = false;
+    let size = u32::try_from(tokio::fs::metadata(path).await?.len())
+        .context("file is too large for ZMODEM")?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .context("failed to open download file")?;
+    let mut sender = Sender::new().context("failed to initialize ZMODEM sender")?;
+    sender
+        .start_file(FileInfo::new(name.as_bytes(), Some(Position::new(size))))
+        .context("failed to offer file for ZMODEM download")?;
+    let mut client_bytes = Vec::new();
+    let mut read_buffer = [0_u8; 8 * 1024];
+    let mut last_client_data = Instant::now();
+    let mut session_completed = false;
 
     loop {
-        tokio::select! {
-            read = stdout.read(&mut to_client) => {
-                let read = read.context("failed to read sz output")?;
-                if read == 0 {
-                    break;
-                }
-                terminal.write_bytes(&to_client[..read]).await?;
+        match sender.poll() {
+            Action::WriteWire(bytes) => {
+                let bytes = bytes.to_vec();
+                terminal.write_bytes(&bytes).await?;
+                sender.wire_written(bytes.len());
             }
-            read = terminal.read_bytes(&mut from_client), if !client_closed => {
-                let read = read.context("failed to read client ZMODEM input")?;
-                if read == 0 {
-                    stdin.shutdown().await.context("failed to close sz input")?;
-                    client_closed = true;
-                } else {
-                    stdin
-                        .write_all(&from_client[..read])
-                        .await
-                        .context("failed to forward client ZMODEM input")?;
+            Action::ReadFile { offset, max_len } => {
+                file.seek(SeekFrom::Start(u64::from(offset.get()))).await?;
+                let mut file_bytes = vec![0_u8; max_len];
+                let read = file.read(&mut file_bytes).await?;
+                anyhow::ensure!(read != 0, "download file ended unexpectedly");
+                sender
+                    .submit_file(&file_bytes[..read])
+                    .context("failed to submit ZMODEM file data")?;
+            }
+            Action::Event(Event::FileCompleted) => sender
+                .finish()
+                .context("failed to finish ZMODEM file transfer")?,
+            Action::Event(Event::SessionCompleted) => session_completed = true,
+            Action::Event(Event::Aborted) => bail!("client aborted ZMODEM transfer"),
+            Action::Event(_) => {}
+            Action::Idle if session_completed => return Ok(()),
+            Action::Idle => {
+                if !client_bytes.is_empty() {
+                    let consumed = sender
+                        .submit_wire(&client_bytes)
+                        .context("invalid ZMODEM data from client")?;
+                    if consumed != 0 {
+                        client_bytes.drain(..consumed);
+                        continue;
+                    }
+                }
+
+                match timeout(ZMODEM_RETRY_INTERVAL, terminal.read_bytes(&mut read_buffer)).await {
+                    Ok(Ok(0)) => bail!("client disconnected during ZMODEM transfer"),
+                    Ok(Ok(read)) => {
+                        client_bytes.extend_from_slice(&read_buffer[..read]);
+                        last_client_data = Instant::now();
+                    }
+                    Ok(Err(error)) => {
+                        return Err(error).context("failed to read client ZMODEM input");
+                    }
+                    Err(_) if last_client_data.elapsed() >= ZMODEM_IDLE_TIMEOUT => {
+                        bail!("ZMODEM transfer timed out")
+                    }
+                    Err(_) => sender
+                        .timeout()
+                        .context("failed to retry ZMODEM handshake")?,
                 }
             }
+            Action::WriteFile(_) => bail!("ZMODEM sender requested file output"),
+            _ => bail!("ZMODEM sender returned an unsupported action"),
         }
     }
-
-    let status = child.wait().await.context("failed to wait for sz")?;
-    anyhow::ensure!(status.success(), "sz exited unsuccessfully: {status}");
-    Ok(())
 }
 
 async fn list_recent_logins<S>(terminal: &mut Terminal<S>, store: &MailStore) -> Result<()>

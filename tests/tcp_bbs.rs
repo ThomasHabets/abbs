@@ -7,12 +7,13 @@ use std::{
 };
 
 use abbs::{BbsConfig, BbsHandle, Callsign, start};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     time::timeout,
 };
+use zmodem2::{Action, Event, Receiver};
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
 
@@ -100,6 +101,76 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+async fn receive_zmodem_download(client: &mut Client, expected: &[u8]) -> Result<()> {
+    let mut receiver = Receiver::new().context("failed to initialize ZMODEM receiver")?;
+    let mut received_file = Vec::new();
+    let mut session_completed = false;
+
+    loop {
+        match receiver.poll() {
+            Action::WriteWire(bytes) => {
+                let bytes = bytes.to_vec();
+                client.stream.write_all(&bytes).await?;
+                client.stream.flush().await?;
+                receiver.wire_written(bytes.len());
+            }
+            Action::WriteFile(bytes) => {
+                let bytes = bytes.to_vec();
+                received_file.extend_from_slice(&bytes);
+                receiver
+                    .file_written(bytes.len())
+                    .context("failed to acknowledge received ZMODEM file data")?;
+            }
+            Action::Event(Event::FileStarted(info)) => {
+                assert_eq!(info.name, b"bulletin.txt");
+            }
+            Action::Event(Event::SessionCompleted) => session_completed = true,
+            Action::Event(Event::Aborted) => bail!("BBS aborted ZMODEM download"),
+            Action::Event(_) => {}
+            Action::Idle if session_completed => break,
+            Action::Idle => {
+                if !client.received.is_empty() {
+                    let consumed = receiver
+                        .submit_wire(&client.received)
+                        .context("BBS sent invalid ZMODEM data")?;
+                    if consumed != 0 {
+                        client.received.drain(..consumed);
+                        continue;
+                    }
+                }
+
+                let mut buffer = [0_u8; 1024];
+                let read = timeout(Duration::from_secs(2), client.stream.read(&mut buffer))
+                    .await
+                    .context("timed out waiting for ZMODEM data")??;
+                anyhow::ensure!(read != 0, "BBS disconnected during ZMODEM download");
+                client.received.extend_from_slice(&buffer[..read]);
+            }
+            Action::ReadFile { .. } => bail!("ZMODEM receiver requested source file data"),
+            _ => bail!("ZMODEM receiver returned an unsupported action"),
+        }
+    }
+
+    loop {
+        if let Some(end) = find_subsequence(&client.received, b"OO") {
+            client.received.drain(..end + 2);
+            break;
+        }
+        let mut buffer = [0_u8; 32];
+        let read = timeout(Duration::from_secs(2), client.stream.read(&mut buffer))
+            .await
+            .context("timed out waiting for ZMODEM final acknowledgement")??;
+        anyhow::ensure!(
+            read != 0,
+            "BBS disconnected before ZMODEM final acknowledgement"
+        );
+        client.received.extend_from_slice(&buffer[..read]);
+    }
+
+    assert_eq!(received_file, expected);
+    Ok(())
+}
+
 fn database_path() -> PathBuf {
     std::env::temp_dir().join(format!(
         "abbs-tcp-test-{}-{}.sqlite3",
@@ -109,19 +180,12 @@ fn database_path() -> PathBuf {
 }
 
 async fn start_test_bbs() -> Result<(BbsHandle, PathBuf, PathBuf)> {
-    start_test_bbs_with_zmodem_sender(PathBuf::from("sz")).await
-}
-
-async fn start_test_bbs_with_zmodem_sender(
-    zmodem_sender: PathBuf,
-) -> Result<(BbsHandle, PathBuf, PathBuf)> {
     let database_path = database_path();
     let files_dir = database_path.with_extension("files");
     let bbs = start(BbsConfig {
         callsign: Callsign::parse("M0BBS")?,
         database_path: database_path.clone(),
         files_dir: files_dir.clone(),
-        zmodem_sender,
         tcp_listen: "127.0.0.1:0".parse()?,
         // No AGW server is needed for TCP functionality; the BBS must remain
         // available while its radio listener retries.
@@ -237,23 +301,9 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
     Ok(())
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn successful_download_stays_silent_until_the_next_command() -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let sender_dir = database_path().with_extension("sz-bin");
-    fs::create_dir(&sender_dir)?;
-    let sender = sender_dir.join("sz");
-    fs::write(
-        &sender,
-        "#!/bin/sh\nprintf 'ZMODEM-START'\nIFS= read -r reply\nprintf 'ZMODEM-END'\n",
-    )?;
-    let mut permissions = fs::metadata(&sender)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&sender, permissions)?;
-
-    let (bbs, database_path, files_dir) = start_test_bbs_with_zmodem_sender(sender).await?;
+    let (bbs, database_path, files_dir) = start_test_bbs().await?;
     let test_result = async {
         fs::write(files_dir.join("bulletin.txt"), b"CQ CQ")?;
         let mut client = Client::connect(bbs.tcp_addr(), "m0alice", b"\r\n").await?;
@@ -261,21 +311,21 @@ async fn successful_download_stays_silent_until_the_next_command() -> Result<()>
         client.send_line("DOWNLOAD bulletin.txt").await?;
         assert!(
             client
-                .read_until(b"ZMODEM-START")
+                .read_until(b"Starting ZMODEM download.\r\n")
                 .await?
                 .contains("Starting ZMODEM download.")
         );
-        client.stream.write_all(b"ack\n").await?;
-        client.stream.flush().await?;
-        client.read_until(b"ZMODEM-END").await?;
+        receive_zmodem_download(&mut client, b"CQ CQ").await?;
 
         let mut buffer = [0_u8; 32];
-        assert!(
-            timeout(Duration::from_millis(100), client.stream.read(&mut buffer))
-                .await
-                .is_err(),
-            "BBS sent terminal data before the next command"
-        );
+        match timeout(Duration::from_millis(100), client.stream.read(&mut buffer)).await {
+            Err(_) => {}
+            Ok(Ok(read)) => panic!(
+                "BBS sent terminal data before the next command: {:?}",
+                &buffer[..read]
+            ),
+            Ok(Err(error)) => return Err(error.into()),
+        }
 
         assert!(client.command("LIST").await?.contains("No messages."));
         Ok(())
@@ -285,8 +335,6 @@ async fn successful_download_stays_silent_until_the_next_command() -> Result<()>
     let shutdown_result = bbs.shutdown().await;
     remove_database(&database_path);
     let _ = fs::remove_dir_all(files_dir);
-    let _ = fs::remove_dir_all(sender_dir);
-
     shutdown_result?;
     test_result
 }

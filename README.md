@@ -79,10 +79,11 @@ Mailbox access ignores an SSID suffix: mail sent to `M0ABC-7` is visible to
 `M0ABC` and all of its SSIDs. Message listings retain the full callsigns used
 when a message was sent.
 
-`DOWNLOAD` invokes the external `sz` utility in binary ZMODEM mode. The client
-must start `rz` when it detects the ZMODEM header. Only immediate regular files
-with a simple, non-whitespace filename are listed or downloadable; paths,
-directories, and symlinks are excluded to prevent directory traversal.
+`DOWNLOAD` uses ABBS's built-in binary ZMODEM sender. The client must start
+`rz`, or otherwise handle ZMODEM, when it detects the transfer header. Only
+immediate regular files with a simple, non-whitespace filename are listed or
+downloadable; paths, directories, and symlinks are excluded to prevent
+directory traversal.
 After a successful transfer the BBS deliberately sends no completion text or
 prompt, so that it cannot be mistaken for the final ZMODEM frame by the
 client's `rz`. Send the next command normally once the client reports that the
