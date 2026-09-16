@@ -320,7 +320,7 @@ async fn serve_tcp_remote_bbs(
     let Packet::RegisterCallsign(port, call) = server.recv().await? else {
         bail!("expected BBS callsign registration");
     };
-    assert_eq!(port, Port(1));
+    assert_eq!(port, Port(2));
     assert_eq!(call, bbs_call);
     server
         .send(&Packet::RegisterCallsignReply {
@@ -334,6 +334,8 @@ async fn serve_tcp_remote_bbs(
     let Packet::RegisterCallsign(port, call) = server.recv().await? else {
         bail!("expected outgoing callsign registration");
     };
+    // AGW's packet decoder represents the X frame's wire port 0 as Port(1).
+    // This differs from the configured AX.25 connection port below.
     assert_eq!(port, Port(1));
     assert_eq!(call, source_call);
     server
@@ -353,7 +355,7 @@ async fn serve_tcp_remote_bbs(
     else {
         bail!("expected an outgoing Connect request");
     };
-    assert_eq!(port, Port(1));
+    assert_eq!(port, Port(2));
     assert_eq!(pid, Pid(0xf0));
     assert_eq!(src, source_call);
     assert_eq!(dst, destination_call);
@@ -400,7 +402,7 @@ async fn tcp_connect_is_opt_in_and_uses_the_requested_ssid() -> Result<()> {
         connect_via: false,
         tcp_listen: "127.0.0.1:0".parse()?,
         agw_addr,
-        agw_port: 1,
+        agw_port: 2,
     })
     .await?;
 

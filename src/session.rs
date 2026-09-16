@@ -23,13 +23,15 @@ const RECENT_LOGIN_LIMIT: usize = 10;
 const ZMODEM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const ZMODEM_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_UPLOAD_BYTES: u32 = 256 * 1024 * 1024;
+/// The AGWPE `X` registration frame is not associated with an AX.25 port.
+const AGW_REGISTRATION_PORT: agw::Port = agw::Port(0);
 
 /// A live AGW endpoint and the dynamically registered source callsigns it
 /// owns. The cache is scoped to one AGW TCP connection and is discarded when
 /// the supervisor reconnects.
 pub(crate) struct AgwEndpoint {
     agw: Arc<AGW>,
-    port: agw::Port,
+    connection_port: agw::Port,
     via: Call,
     connect_via: bool,
     registered: Mutex<HashSet<Call>>,
@@ -37,10 +39,15 @@ pub(crate) struct AgwEndpoint {
 
 impl AgwEndpoint {
     #[must_use]
-    pub(crate) fn new(agw: Arc<AGW>, port: agw::Port, via: Call, connect_via: bool) -> Self {
+    pub(crate) fn new(
+        agw: Arc<AGW>,
+        connection_port: agw::Port,
+        via: Call,
+        connect_via: bool,
+    ) -> Self {
         Self {
             agw,
-            port,
+            connection_port,
             via,
             connect_via,
             registered: Mutex::new(HashSet::new()),
@@ -54,7 +61,10 @@ impl AgwEndpoint {
     ) -> Result<agw::r#async::Connection<'_>> {
         let mut registered = self.registered.lock().await;
         if registered.insert(source.clone())
-            && let Err(error) = self.agw.register_callsign(self.port, source).await
+            && let Err(error) = self
+                .agw
+                .register_callsign(AGW_REGISTRATION_PORT, source)
+                .await
         {
             registered.remove(source);
             return Err(error.into());
@@ -64,11 +74,11 @@ impl AgwEndpoint {
         let connection = if self.connect_via {
             let via = [agw::ViaHop::seen(self.via.clone())];
             self.agw
-                .connect_via(self.port, Pid(0xf0), source, destination, &via)
+                .connect_via(self.connection_port, Pid(0xf0), source, destination, &via)
                 .await
         } else {
             self.agw
-                .connect(self.port, Pid(0xf0), source, destination, &[])
+                .connect(self.connection_port, Pid(0xf0), source, destination, &[])
                 .await
         };
         connection.context("outgoing AX.25 connection failed")
@@ -76,7 +86,7 @@ impl AgwEndpoint {
 
     async fn callsign_heard(&self) -> Result<Vec<agw::CallsignHeard>> {
         self.agw
-            .callsign_heard(self.port)
+            .callsign_heard(self.connection_port)
             .await
             .context("AGW heard-stations query failed")
     }
