@@ -141,19 +141,7 @@ where
         let line = match input {
             TerminalInput::Line(line) => line,
             TerminalInput::Zmodem(initial) => {
-                write_prompt = match receive_zmodem(&mut terminal, &uploads, initial).await {
-                    Ok(()) => {
-                        // A ZMODEM sender answers the receiver's final ZFIN
-                        // with `OO`.  Consume it before resuming line input:
-                        // it can otherwise arrive in the same TCP read as the
-                        // user's next command and turn `FILES` into `OOFILES`.
-                        let _ =
-                            timeout(Duration::from_secs(2), terminal.consume_zmodem_final_ack())
-                                .await;
-                        false
-                    }
-                    Err(_) => true,
-                };
+                write_prompt = handle_zmodem_input(&mut terminal, &uploads, initial).await;
                 continue;
             }
         };
@@ -166,6 +154,7 @@ where
 
         match command.as_str() {
             "HELP" if fields.next().is_none() => write_help(&mut terminal).await?,
+            "INFO" if fields.next().is_none() => write_info(&mut terminal, &bbs_callsign).await?,
             "LIST" if fields.next().is_none() => {
                 list_messages(&mut terminal, &store, identity.clone()).await?;
             }
@@ -222,6 +211,25 @@ where
                     .await?;
             }
         }
+    }
+}
+
+async fn handle_zmodem_input<S>(
+    terminal: &mut Terminal<S>,
+    uploads: &FileArea,
+    initial: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match receive_zmodem(terminal, uploads, initial).await {
+        Ok(()) => {
+            // A ZMODEM sender answers the receiver's final ZFIN with `OO`.
+            // Consume it so it cannot prefix the client's next command.
+            let _ = timeout(Duration::from_secs(2), terminal.consume_zmodem_final_ack()).await;
+            false
+        }
+        Err(_) => true,
     }
 }
 
@@ -584,10 +592,26 @@ where
         .write_line("  SEND <callsign|ALL>  Send private mail or post publicly")
         .await?;
     terminal
+        .write_line("  INFO                 Show BBS information")
+        .await?;
+    terminal
         .write_line("  HELP                 Show this help")
         .await?;
     terminal
         .write_line("  QUIT                 Disconnect")
+        .await?;
+    Ok(())
+}
+
+async fn write_info<S>(terminal: &mut Terminal<S>, bbs_callsign: &Callsign) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    terminal
+        .write_line(&format!("ABBS {}", env!("CARGO_PKG_VERSION")))
+        .await?;
+    terminal
+        .write_line(&format!("BBS callsign: {bbs_callsign}"))
         .await?;
     Ok(())
 }

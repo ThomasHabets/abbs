@@ -66,6 +66,7 @@ After connecting, type `HELP` to display the command list.
 | Command | Description |
 | --- | --- |
 | `LIST` | List public posts and private mail addressed to you. |
+| `INFO` | Show the BBS callsign and ABBS version. |
 | `SENT` | List messages sent by your callsign. |
 | `LOGINS` | List the 10 most recent callsign logins, their transport, and time. |
 | `HEARD` | List the 10 most recent AX.25 stations to connect to this BBS. |

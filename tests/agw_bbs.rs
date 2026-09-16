@@ -83,6 +83,7 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
         assert!(help.contains("Commands:"));
         assert!(help.contains("SEND <callsign|ALL>"));
         assert!(help.contains("HEARD"));
+        assert!(help.contains("INFO"));
 
         server
             .send(&Packet::Data {

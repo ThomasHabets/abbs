@@ -453,6 +453,10 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
     assert!(logins.contains("M0EVE via TCP"));
     assert!(!logins.contains("127.0.0.1"));
 
+    let info = eve.command("INFO").await?;
+    assert!(info.contains(&format!("ABBS {}", env!("CARGO_PKG_VERSION"))));
+    assert!(info.contains("BBS callsign: M0BBS"));
+
     let files = eve.command("FILES").await?;
     assert!(files.contains("bulletin.txt (5 bytes)"));
     assert!(
