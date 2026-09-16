@@ -254,7 +254,6 @@ async fn run_agw_listener(
         .context("failed to listen for AX.25 connections")?;
     agw_endpoint.send_replace(Some(Arc::new(AgwEndpoint::new(
         Arc::clone(&agw),
-        config.agw_addr.clone(),
         Port(config.agw_port),
         bbs_call,
         config.connect_via,

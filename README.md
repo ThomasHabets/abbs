@@ -124,9 +124,9 @@ permits clients to originate AX.25 connections under that stated callsign.
 
 `LOGINS` records and displays the callsign, login time, and whether the user
 connected over TCP or AX.25. It does not retain or display TCP IP addresses.
-`HEARD` sends the AGWPE `H` query to the selected radio port and displays the
-live response. Endpoints that do not support this query, including Direwolf,
-report an error rather than a list.
+`HEARD` sends the AGWPE `H` query over the BBS's active AGW connection to the
+selected radio port and displays the live response. Endpoints that do not
+support this query, including Direwolf, report an error rather than a list.
 
 ## Development
 

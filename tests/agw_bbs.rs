@@ -35,12 +35,13 @@ async fn read_bbs_output_until(server: &mut AGWServer, expected: &str) -> Result
     }
 }
 
-async fn reply_to_heard_query(listener: &TcpListener) -> Result<()> {
-    let (stream, _) = listener.accept().await?;
-    let mut server = AGWServer::new(stream);
-    let Packet::CallsignHeardQuery(port) = next_packet(&mut server, "heard-stations query").await?
-    else {
-        bail!("expected heard-stations query");
+async fn reply_to_heard_query(server: &mut AGWServer) -> Result<()> {
+    let port = loop {
+        match next_packet(server, "heard-stations query").await? {
+            Packet::CallsignHeardQuery(port) => break port,
+            Packet::Data { .. } => {}
+            packet => bail!("expected heard-stations query, got {packet:?}"),
+        }
     };
     assert_eq!(port, Port(1));
     for data in [
@@ -118,7 +119,7 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
             })
             .await?;
 
-        reply_to_heard_query(&agw_listener).await?;
+        reply_to_heard_query(&mut server).await?;
 
         let heard = read_bbs_output_until(&mut server, "M0OTHER-3").await?;
         assert!(heard.contains("Heard callsigns:"));

@@ -29,7 +29,6 @@ const MAX_UPLOAD_BYTES: u32 = 256 * 1024 * 1024;
 /// the supervisor reconnects.
 pub(crate) struct AgwEndpoint {
     agw: Arc<AGW>,
-    addr: String,
     port: agw::Port,
     via: Call,
     connect_via: bool,
@@ -38,16 +37,9 @@ pub(crate) struct AgwEndpoint {
 
 impl AgwEndpoint {
     #[must_use]
-    pub(crate) fn new(
-        agw: Arc<AGW>,
-        addr: String,
-        port: agw::Port,
-        via: Call,
-        connect_via: bool,
-    ) -> Self {
+    pub(crate) fn new(agw: Arc<AGW>, port: agw::Port, via: Call, connect_via: bool) -> Self {
         Self {
             agw,
-            addr,
             port,
             via,
             connect_via,
@@ -82,15 +74,11 @@ impl AgwEndpoint {
         connection.context("outgoing AX.25 connection failed")
     }
 
-    async fn callsigns_heard(&self) -> Result<Vec<agw::CallsignHeard>> {
-        let addr = self.addr.clone();
-        let port = self.port;
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            let mut agw = agw::AGW::new(&addr)?;
-            agw.callsign_heard(port).map_err(Into::into)
-        })
-        .await
-        .context("AGW heard-stations query task failed")?
+    async fn callsign_heard(&self) -> Result<Vec<agw::CallsignHeard>> {
+        self.agw
+            .callsign_heard(self.port)
+            .await
+            .context("AGW heard-stations query failed")
     }
 }
 
@@ -132,7 +120,7 @@ impl HeardConnector {
             .borrow()
             .clone()
             .context("AGW is currently unavailable")?;
-        endpoint.callsigns_heard().await
+        endpoint.callsign_heard().await
     }
 }
 
