@@ -1,6 +1,8 @@
 ## General
 
 * One logical change per commit
+* If changes or or new features are needed on the agw crate, the tell the user
+* Do not implement anything that should instead be added in the agw API
 
 ## Commit messages
 
