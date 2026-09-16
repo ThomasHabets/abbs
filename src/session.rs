@@ -29,6 +29,7 @@ const MAX_UPLOAD_BYTES: u32 = 256 * 1024 * 1024;
 /// the supervisor reconnects.
 pub(crate) struct AgwEndpoint {
     agw: Arc<AGW>,
+    addr: String,
     port: agw::Port,
     via: Call,
     connect_via: bool,
@@ -37,9 +38,16 @@ pub(crate) struct AgwEndpoint {
 
 impl AgwEndpoint {
     #[must_use]
-    pub(crate) fn new(agw: Arc<AGW>, port: agw::Port, via: Call, connect_via: bool) -> Self {
+    pub(crate) fn new(
+        agw: Arc<AGW>,
+        addr: String,
+        port: agw::Port,
+        via: Call,
+        connect_via: bool,
+    ) -> Self {
         Self {
             agw,
+            addr,
             port,
             via,
             connect_via,
@@ -73,6 +81,17 @@ impl AgwEndpoint {
         };
         connection.context("outgoing AX.25 connection failed")
     }
+
+    async fn callsigns_heard(&self) -> Result<Vec<agw::CallsignHeard>> {
+        let addr = self.addr.clone();
+        let port = self.port;
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let mut agw = agw::AGW::new(&addr)?;
+            agw.callsign_heard(port).map_err(Into::into)
+        })
+        .await
+        .context("AGW heard-stations query task failed")?
+    }
 }
 
 /// Access to the currently connected AGW endpoint.
@@ -95,10 +114,33 @@ impl OutboundConnector {
     }
 }
 
+/// Access to the current AGW endpoint for heard-stations queries.
+#[derive(Clone)]
+pub(crate) struct HeardConnector {
+    endpoint: watch::Receiver<Option<Arc<AgwEndpoint>>>,
+}
+
+impl HeardConnector {
+    #[must_use]
+    pub(crate) fn new(endpoint: watch::Receiver<Option<Arc<AgwEndpoint>>>) -> Self {
+        Self { endpoint }
+    }
+
+    async fn callsigns_heard(&self) -> Result<Vec<agw::CallsignHeard>> {
+        let endpoint = self
+            .endpoint
+            .borrow()
+            .clone()
+            .context("AGW is currently unavailable")?;
+        endpoint.callsigns_heard().await
+    }
+}
+
 pub(crate) struct SessionOptions {
     pub prompt: String,
     pub body_prompt: String,
     pub show_bbs_welcome: bool,
+    pub heard: HeardConnector,
     pub outbound: Option<OutboundConnector>,
 }
 
@@ -167,7 +209,7 @@ where
                 list_recent_logins(&mut terminal, &store).await?;
             }
             "HEARD" if fields.next().is_none() => {
-                list_recent_ax25_logins(&mut terminal, &store).await?;
+                list_heard_callsigns(&mut terminal, &options.heard).await?;
             }
             "FILES" if fields.next().is_none() => {
                 list_files(&mut terminal, &files).await?;
@@ -576,7 +618,7 @@ where
         .write_line("  LOGINS               List the 10 most recent logins")
         .await?;
     terminal
-        .write_line("  HEARD                List the 10 most recent AX.25 stations")
+        .write_line("  HEARD                List callsigns recently heard by AGW")
         .await?;
     terminal
         .write_line("  FILES                List files available for download")
@@ -769,21 +811,27 @@ where
     Ok(())
 }
 
-async fn list_recent_ax25_logins<S>(terminal: &mut Terminal<S>, store: &MailStore) -> Result<()>
+async fn list_heard_callsigns<S>(terminal: &mut Terminal<S>, heard: &HeardConnector) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let logins = store.recent_ax25_logins(RECENT_LOGIN_LIMIT).await?;
-    if logins.is_empty() {
-        terminal.write_line("No AX.25 stations heard.").await?;
+    let callsigns = match heard.callsigns_heard().await {
+        Ok(callsigns) => callsigns,
+        Err(error) => {
+            terminal
+                .write_line(&format!("Unable to retrieve heard callsigns: {error:#}"))
+                .await?;
+            return Ok(());
+        }
+    };
+    if callsigns.is_empty() {
+        terminal.write_line("No callsigns heard.").await?;
         return Ok(());
     }
 
-    terminal.write_line("Recent AX.25 stations:").await?;
-    for login in logins {
-        terminal
-            .write_line(&format!("{} at {}", login.callsign, login.logged_in_at))
-            .await?;
+    terminal.write_line("Heard callsigns:").await?;
+    for callsign in callsigns {
+        terminal.write_line(&callsign.call.to_string()).await?;
     }
     Ok(())
 }

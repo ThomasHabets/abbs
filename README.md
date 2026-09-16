@@ -69,7 +69,7 @@ After connecting, type `HELP` to display the command list.
 | `INFO` | Show the BBS callsign and ABBS version. |
 | `SENT` | List messages sent by your callsign. |
 | `LOGINS` | List the 10 most recent callsign logins, their transport, and time. |
-| `HEARD` | List the 10 most recent AX.25 stations to connect to this BBS. |
+| `HEARD` | List callsigns recently heard by the AGW endpoint. |
 | `FILES` | List files available for download. |
 | `DOWNLOAD <file>` | Send one listed file using ZMODEM. |
 | `CONNECT <callsign> <ssid>` | Connect to another BBS over AX.25. |
@@ -124,8 +124,9 @@ permits clients to originate AX.25 connections under that stated callsign.
 
 `LOGINS` records and displays the callsign, login time, and whether the user
 connected over TCP or AX.25. It does not retain or display TCP IP addresses.
-`HEARD` shows the AX.25 subset of those BBS connections; it is not a list of
-every station decoded by the radio.
+`HEARD` sends the AGWPE `H` query to the selected radio port and displays the
+live response. Endpoints that do not support this query, including Direwolf,
+report an error rather than a list.
 
 ## Development
 

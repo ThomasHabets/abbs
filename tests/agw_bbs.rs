@@ -35,6 +35,28 @@ async fn read_bbs_output_until(server: &mut AGWServer, expected: &str) -> Result
     }
 }
 
+async fn reply_to_heard_query(listener: &TcpListener) -> Result<()> {
+    let (stream, _) = listener.accept().await?;
+    let mut server = AGWServer::new(stream);
+    let Packet::CallsignHeardQuery(port) = next_packet(&mut server, "heard-stations query").await?
+    else {
+        bail!("expected heard-stations query");
+    };
+    assert_eq!(port, Port(1));
+    for data in [
+        b"M0HEARD Mon,21Feb2000 11:14:30\0".to_vec(),
+        b"M0OTHER-3 Mon,21Feb2000 11:14:30\0".to_vec(),
+    ]
+    .into_iter()
+    .chain(std::iter::repeat_n(vec![0; 33], 18))
+    {
+        server
+            .send(&Packet::CallsignHeardReply { port, data })
+            .await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Result<()> {
     let agw_listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -90,13 +112,17 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
             .send(&Packet::Data {
                 port: Port(1),
                 pid: Pid(0xf0),
-                src: remote_call,
-                dst: bbs_call,
+                src: remote_call.clone(),
+                dst: bbs_call.clone(),
                 data: b"HEARD\r".to_vec(),
             })
             .await?;
-        let heard = read_bbs_output_until(&mut server, "M0REMOTE").await?;
-        assert!(heard.contains("Recent AX.25 stations:"));
+
+        reply_to_heard_query(&agw_listener).await?;
+
+        let heard = read_bbs_output_until(&mut server, "M0OTHER-3").await?;
+        assert!(heard.contains("Heard callsigns:"));
+        assert!(heard.contains("M0HEARD"));
         Ok::<(), anyhow::Error>(())
     });
 

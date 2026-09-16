@@ -14,7 +14,7 @@ use tokio::{
 use crate::{
     callsign::Callsign,
     files::FileArea,
-    session::{AgwEndpoint, OutboundConnector, SessionOptions, run_session},
+    session::{AgwEndpoint, HeardConnector, OutboundConnector, SessionOptions, run_session},
     store::{LoginTransport, MailStore},
     terminal::Terminal,
 };
@@ -184,6 +184,7 @@ async fn handle_tcp_session(
                         prompt: config.prompt,
                         body_prompt: config.body_prompt,
                         show_bbs_welcome: false,
+                        heard: HeardConnector::new(agw_endpoint.clone()),
                         outbound: config
                             .allow_tcp_connect
                             .then(|| OutboundConnector::new(agw_endpoint)),
@@ -253,6 +254,7 @@ async fn run_agw_listener(
         .context("failed to listen for AX.25 connections")?;
     agw_endpoint.send_replace(Some(Arc::new(AgwEndpoint::new(
         Arc::clone(&agw),
+        config.agw_addr.clone(),
         Port(config.agw_port),
         bbs_call,
         config.connect_via,
@@ -277,6 +279,7 @@ async fn run_agw_listener(
                 let store = store.clone();
                 let files = files.clone();
                 let uploads = uploads.clone();
+                let heard = HeardConnector::new(agw_endpoint.subscribe());
                 let outbound = OutboundConnector::new(agw_endpoint.subscribe());
                 sessions.push(Box::pin(async move {
                     if let Err(error) = store.record_login(remote.clone(), LoginTransport::Ax25).await {
@@ -295,6 +298,7 @@ async fn run_agw_listener(
                             prompt,
                             body_prompt,
                             show_bbs_welcome: true,
+                            heard,
                             outbound: Some(outbound),
                         },
                     )).await {
