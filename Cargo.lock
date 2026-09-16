@@ -19,9 +19,9 @@ dependencies = [
 
 [[package]]
 name = "agw"
-version = "0.8.2"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd2ebb2718d738523cdebe146c447b532ddaca3072c2a2adcc94ce767851eb6"
+checksum = "fd2d2e9630d1d6636b82c37da813ee91aed982898b7eb899af917530f797b2ce"
 dependencies = [
  "cc",
  "crossbeam-channel",

@@ -291,6 +291,7 @@ async fn start_test_bbs_with_options(
         prompt,
         body_prompt,
         allow_tcp_connect: false,
+        connect_via: false,
         tcp_listen: "127.0.0.1:0".parse()?,
         // No AGW server is needed for TCP functionality; the BBS must remain
         // available while its radio listener retries.
@@ -343,21 +344,19 @@ async fn serve_tcp_remote_bbs(
         })
         .await?;
 
-    let Packet::ConnectVia {
+    let Packet::Connect {
         port,
         pid,
         src,
         dst,
-        via,
     } = server.recv().await?
     else {
-        bail!("expected an outgoing ConnectVia request");
+        bail!("expected an outgoing Connect request");
     };
     assert_eq!(port, Port(1));
     assert_eq!(pid, Pid(0xf0));
     assert_eq!(src, source_call);
     assert_eq!(dst, destination_call);
-    assert_eq!(via, vec![bbs_call.clone()]);
     server
         .send(&Packet::ConnectionEstablished {
             port,
@@ -398,6 +397,7 @@ async fn tcp_connect_is_opt_in_and_uses_the_requested_ssid() -> Result<()> {
         prompt: "> ".into(),
         body_prompt: "> ".into(),
         allow_tcp_connect: true,
+        connect_via: false,
         tcp_listen: "127.0.0.1:0".parse()?,
         agw_addr,
         agw_port: 1,

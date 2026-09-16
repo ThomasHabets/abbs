@@ -35,6 +35,10 @@ struct Cli {
     #[arg(long)]
     allow_tcp_connect: bool,
 
+    /// Include this BBS as a seen AX.25 via hop for outgoing connections.
+    #[arg(long)]
+    connect_via: bool,
+
     /// TCP address for terminal clients.
     #[arg(long, default_value = "0.0.0.0:8000")]
     tcp_listen: SocketAddr,
@@ -60,6 +64,7 @@ async fn main() -> Result<()> {
         prompt: cli.prompt,
         body_prompt: cli.body_prompt,
         allow_tcp_connect: cli.allow_tcp_connect,
+        connect_via: cli.connect_via,
         tcp_listen: cli.tcp_listen,
         agw_addr: cli.agw_addr,
         agw_port: cli.agw_port,

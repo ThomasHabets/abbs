@@ -30,16 +30,18 @@ pub(crate) struct AgwEndpoint {
     agw: Arc<AGW>,
     port: agw::Port,
     via: Call,
+    connect_via: bool,
     registered: Mutex<HashSet<Call>>,
 }
 
 impl AgwEndpoint {
     #[must_use]
-    pub(crate) fn new(agw: Arc<AGW>, port: agw::Port, via: Call) -> Self {
+    pub(crate) fn new(agw: Arc<AGW>, port: agw::Port, via: Call, connect_via: bool) -> Self {
         Self {
             agw,
             port,
             via,
+            connect_via,
             registered: Mutex::new(HashSet::new()),
         }
     }
@@ -58,16 +60,17 @@ impl AgwEndpoint {
         }
         drop(registered);
 
-        self.agw
-            .connect(
-                self.port,
-                Pid(0xf0),
-                source,
-                destination,
-                std::slice::from_ref(&self.via),
-            )
-            .await
-            .context("outgoing AX.25 connection failed")
+        let connection = if self.connect_via {
+            let via = [agw::ViaHop::seen(self.via.clone())];
+            self.agw
+                .connect_via(self.port, Pid(0xf0), source, destination, &via)
+                .await
+        } else {
+            self.agw
+                .connect(self.port, Pid(0xf0), source, destination, &[])
+                .await
+        };
+        connection.context("outgoing AX.25 connection failed")
     }
 }
 

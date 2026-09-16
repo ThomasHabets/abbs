@@ -30,6 +30,7 @@ pub struct BbsConfig {
     pub prompt: String,
     pub body_prompt: String,
     pub allow_tcp_connect: bool,
+    pub connect_via: bool,
     pub tcp_listen: SocketAddr,
     pub agw_addr: String,
     pub agw_port: u8,
@@ -253,6 +254,7 @@ async fn run_agw_listener(
         Arc::clone(&agw),
         Port(config.agw_port),
         bbs_call,
+        config.connect_via,
     ))));
     info!(
         "listening for AX.25 connections to {} on AGW {} port {}",

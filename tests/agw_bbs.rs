@@ -6,7 +6,7 @@ use std::{
 };
 
 use abbs::{BbsConfig, Callsign, start};
-use agw::{Call, Packet, Pid, Port, r#async::AGWServer};
+use agw::{Call, Packet, Pid, Port, ViaHop, r#async::AGWServer};
 use anyhow::{Context, Result, bail};
 use tokio::{net::TcpListener, time::timeout};
 
@@ -95,6 +95,7 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
         prompt: "> ".into(),
         body_prompt: "> ".into(),
         allow_tcp_connect: false,
+        connect_via: false,
         tcp_listen: "127.0.0.1:0".parse()?,
         agw_addr,
         agw_port: 1,
@@ -140,6 +141,27 @@ async fn expect_outbound_registration(server: &mut AGWServer, source: &Call) -> 
     }
 }
 
+async fn expect_connect(server: &mut AGWServer, source: &Call, destination: &Call) -> Result<()> {
+    loop {
+        match next_packet(server, "Connect").await? {
+            Packet::Connect {
+                port,
+                pid,
+                src,
+                dst,
+            } => {
+                assert_eq!(port, Port(1));
+                assert_eq!(pid, Pid(0xf0));
+                assert_eq!(src, source.clone());
+                assert_eq!(dst, destination.clone());
+                return Ok(());
+            }
+            Packet::Data { .. } => {}
+            packet => bail!("unexpected packet before Connect: {packet:?}"),
+        }
+    }
+}
+
 async fn expect_connect_via(
     server: &mut AGWServer,
     bbs: &Call,
@@ -147,8 +169,8 @@ async fn expect_connect_via(
     destination: &Call,
 ) -> Result<()> {
     loop {
-        match next_packet(server, "ConnectVia").await? {
-            Packet::ConnectVia {
+        match next_packet(server, "seen ConnectVia").await? {
+            Packet::ConnectViaMarked {
                 port,
                 pid,
                 src,
@@ -159,7 +181,7 @@ async fn expect_connect_via(
                 assert_eq!(pid, Pid(0xf0));
                 assert_eq!(src, source.clone());
                 assert_eq!(dst, destination.clone());
-                assert_eq!(via, vec![bbs.clone()]);
+                assert_eq!(via, vec![ViaHop::seen(bbs.clone())]);
                 return Ok(());
             }
             Packet::Data { .. } => {}
@@ -210,6 +232,7 @@ async fn serve_ax25_remote_bbs(
     client_call: Call,
     source_call: Call,
     destination_call: Call,
+    connect_via: bool,
 ) -> Result<()> {
     let (stream, _) = agw_listener.accept().await?;
     let mut server = AGWServer::new(stream);
@@ -247,7 +270,11 @@ async fn serve_ax25_remote_bbs(
         })
         .await?;
     expect_outbound_registration(&mut server, &source_call).await?;
-    expect_connect_via(&mut server, &bbs_call, &source_call, &destination_call).await?;
+    if connect_via {
+        expect_connect_via(&mut server, &bbs_call, &source_call, &destination_call).await?;
+    } else {
+        expect_connect(&mut server, &source_call, &destination_call).await?;
+    }
     server
         .send(&Packet::ConnectionEstablished {
             port: Port(1),
@@ -298,8 +325,7 @@ async fn serve_ax25_remote_bbs(
     Ok(())
 }
 
-#[tokio::test]
-async fn connects_an_ax25_client_to_a_remote_bbs() -> Result<()> {
+async fn run_ax25_connect_test(connect_via: bool) -> Result<()> {
     let agw_listener = TcpListener::bind("127.0.0.1:0").await?;
     let agw_addr = agw_listener.local_addr()?.to_string();
     let fake_agw = tokio::spawn(serve_ax25_remote_bbs(
@@ -308,6 +334,7 @@ async fn connects_an_ax25_client_to_a_remote_bbs() -> Result<()> {
         "M0REM-4".parse()?,
         "M0REM-9".parse()?,
         "M0DEST".parse()?,
+        connect_via,
     ));
 
     let database_path = database_path();
@@ -320,6 +347,7 @@ async fn connects_an_ax25_client_to_a_remote_bbs() -> Result<()> {
         prompt: "> ".into(),
         body_prompt: "> ".into(),
         allow_tcp_connect: false,
+        connect_via,
         tcp_listen: "127.0.0.1:0".parse()?,
         agw_addr,
         agw_port: 1,
@@ -335,4 +363,14 @@ async fn connects_an_ax25_client_to_a_remote_bbs() -> Result<()> {
     let _ = fs::remove_file(database_path.with_extension("sqlite3-shm"));
     let _ = fs::remove_dir_all(files_dir);
     Ok(())
+}
+
+#[tokio::test]
+async fn connects_an_ax25_client_to_a_remote_bbs() -> Result<()> {
+    run_ax25_connect_test(false).await
+}
+
+#[tokio::test]
+async fn adds_a_seen_bbs_via_hop_when_enabled() -> Result<()> {
+    run_ax25_connect_test(true).await
 }

@@ -42,6 +42,7 @@ Options:
 --prompt <TEXT>            Command prompt [default: > ]
 --body-prompt <TEXT>       Message-body prompt [default: > ]
 --allow-tcp-connect         Allow TCP clients to create AX.25 BBS connections
+--connect-via               Add this BBS as a seen AX.25 via hop for CONNECT
 --tcp-listen <ADDRESS>     TCP bind address [default: 0.0.0.0:8000]
 --agw-addr <ADDRESS>       AGWPE/Direwolf endpoint [default: 127.0.0.1:8010]
 --agw-port <NUMBER>        AGWPE radio port [default: 1]
@@ -111,13 +112,13 @@ therefore rely on that stated callsign. Do not expose the TCP listener to
 untrusted users if stronger identity guarantees are required.
 
 `CONNECT` is available to AX.25 clients. It uses the client's base callsign
-with the supplied SSID (0 through 15), routes through this BBS's callsign, and
-bridges terminal text to the remote BBS. Enter `~.` on a line by itself to
-disconnect and return to ABBS. ZMODEM and other binary transfers are not
-available while bridged. TCP clients can use this command only with
+with the supplied SSID (0 through 15) and bridges terminal text to the remote
+BBS. Enter `~.` on a line by itself to disconnect and return to ABBS. ZMODEM
+and other binary transfers are not available while bridged. By default this
+makes a direct AX.25 connection. `--connect-via` adds this BBS's callsign as a
+seen digipeater hop instead. TCP clients can use this command only with
 `--allow-tcp-connect`; because a TCP callsign is self-declared, enabling it
 permits clients to originate AX.25 connections under that stated callsign.
-The standard AGWPE `ConnectVia` interface cannot mark the BBS via hop as seen.
 
 `LOGINS` records and displays the callsign, login time, and whether the user
 connected over TCP or AX.25. It does not retain or display TCP IP addresses.
