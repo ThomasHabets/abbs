@@ -175,6 +175,9 @@ where
             "LOGINS" if fields.next().is_none() => {
                 list_recent_logins(&mut terminal, &store).await?;
             }
+            "HEARD" if fields.next().is_none() => {
+                list_recent_ax25_logins(&mut terminal, &store).await?;
+            }
             "FILES" if fields.next().is_none() => {
                 list_files(&mut terminal, &files).await?;
             }
@@ -560,6 +563,9 @@ where
         .write_line("  LOGINS               List the 10 most recent logins")
         .await?;
     terminal
+        .write_line("  HEARD                List the 10 most recent AX.25 stations")
+        .await?;
+    terminal
         .write_line("  FILES                List files available for download")
         .await?;
     terminal
@@ -729,6 +735,25 @@ where
                 "{} via {transport} at {}",
                 login.callsign, login.logged_in_at
             ))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn list_recent_ax25_logins<S>(terminal: &mut Terminal<S>, store: &MailStore) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let logins = store.recent_ax25_logins(RECENT_LOGIN_LIMIT).await?;
+    if logins.is_empty() {
+        terminal.write_line("No AX.25 stations heard.").await?;
+        return Ok(());
+    }
+
+    terminal.write_line("Recent AX.25 stations:").await?;
+    for login in logins {
+        terminal
+            .write_line(&format!("{} at {}", login.callsign, login.logged_in_at))
             .await?;
     }
     Ok(())

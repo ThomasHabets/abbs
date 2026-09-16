@@ -74,14 +74,27 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
             .send(&Packet::Data {
                 port: Port(1),
                 pid: Pid(0xf0),
-                src: remote_call,
-                dst: bbs_call,
+                src: remote_call.clone(),
+                dst: bbs_call.clone(),
                 data: b"HELP\r".to_vec(),
             })
             .await?;
         let help = read_bbs_output_until(&mut server, "  QUIT").await?;
         assert!(help.contains("Commands:"));
         assert!(help.contains("SEND <callsign|ALL>"));
+        assert!(help.contains("HEARD"));
+
+        server
+            .send(&Packet::Data {
+                port: Port(1),
+                pid: Pid(0xf0),
+                src: remote_call,
+                dst: bbs_call,
+                data: b"HEARD\r".to_vec(),
+            })
+            .await?;
+        let heard = read_bbs_output_until(&mut server, "M0REMOTE").await?;
+        assert!(heard.contains("Recent AX.25 stations:"));
         Ok::<(), anyhow::Error>(())
     });
 

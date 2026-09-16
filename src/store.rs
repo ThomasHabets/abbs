@@ -122,33 +122,32 @@ impl MailStore {
                  LIMIT ?1",
             )?;
             let records = statement
-                .query_map(params![limit], |row| {
-                    let transport = match row.get::<_, String>(1)?.as_str() {
-                        "TCP" => LoginTransport::Tcp,
-                        "AX.25" => LoginTransport::Ax25,
-                        other => {
-                            return Err(rusqlite::Error::FromSqlConversionFailure(
-                                1,
-                                rusqlite::types::Type::Text,
-                                Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!("invalid login transport {other:?}"),
-                                )),
-                            ));
-                        }
-                    };
-                    Ok(LoginRecord {
-                        callsign: Callsign::parse(&row.get::<_, String>(0)?)
-                            .map_err(to_sql_error)?,
-                        transport,
-                        logged_in_at: row.get(2)?,
-                    })
-                })?
+                .query_map(params![limit], login_record_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(records)
         })
         .await
         .context("recent-login task failed")?
+    }
+
+    pub async fn recent_ax25_logins(&self, limit: usize) -> Result<Vec<LoginRecord>> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = open_connection(&path)?;
+            let mut statement = connection.prepare(
+                "SELECT callsign, transport, logged_in_at
+                 FROM logins
+                 WHERE transport = 'AX.25'
+                 ORDER BY id DESC
+                 LIMIT ?1",
+            )?;
+            let records = statement
+                .query_map(params![limit], login_record_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(records)
+        })
+        .await
+        .context("recent AX.25 login task failed")?
     }
 
     pub async fn list_visible(&self, viewer: Callsign) -> Result<Vec<MessageSummary>> {
@@ -358,6 +357,28 @@ fn open_connection(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+fn login_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LoginRecord> {
+    let transport = match row.get::<_, String>(1)?.as_str() {
+        "TCP" => LoginTransport::Tcp,
+        "AX.25" => LoginTransport::Ax25,
+        other => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid login transport {other:?}"),
+                )),
+            ));
+        }
+    };
+    Ok(LoginRecord {
+        callsign: Callsign::parse(&row.get::<_, String>(0)?).map_err(to_sql_error)?,
+        transport,
+        logged_in_at: row.get(2)?,
+    })
+}
+
 fn to_sql_error(error: anyhow::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
@@ -477,6 +498,10 @@ mod tests {
         assert_eq!(logins[0].callsign.as_str(), "M0BOB");
         assert_eq!(logins[0].transport, LoginTransport::Ax25);
         assert_eq!(logins[1].transport, LoginTransport::Tcp);
+
+        let heard = store.recent_ax25_logins(10).await.unwrap();
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].callsign.as_str(), "M0BOB");
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
