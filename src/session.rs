@@ -2,6 +2,7 @@ use std::{collections::HashSet, io::SeekFrom, path::Path, str::SplitWhitespace, 
 
 use agw::{Call, Pid, r#async::AGW};
 use anyhow::{Context, Result, bail};
+use log::info;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     sync::{Mutex, watch},
@@ -135,6 +136,7 @@ where
         }
         write_prompt = true;
         let Some(input) = terminal.read_input().await? else {
+            info!("{identity} disconnected");
             terminal.shutdown().await?;
             return Ok(());
         };
@@ -186,6 +188,7 @@ where
                     .await?,
                     ConnectExit::ClientDisconnected
                 ) {
+                    info!("{identity} disconnected");
                     terminal.shutdown().await?;
                     return Ok(());
                 }
@@ -202,6 +205,7 @@ where
             }
             "QUIT" | "BYE" | "EXIT" if fields.next().is_none() => {
                 terminal.write_line("Goodbye.").await?;
+                info!("{identity} disconnected");
                 terminal.shutdown().await?;
                 return Ok(());
             }
@@ -314,6 +318,7 @@ where
             return Ok(ConnectExit::Continue);
         }
     };
+    info!("outgoing AX.25 connection from {source} to {destination}");
 
     terminal
         .write_line("Connected. Enter ~. on a line by itself to return here.")

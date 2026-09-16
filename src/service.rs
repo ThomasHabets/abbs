@@ -172,6 +172,7 @@ async fn handle_tcp_session(
                 store
                     .record_login(callsign.clone(), LoginTransport::Tcp)
                     .await?;
+                info!("TCP client {callsign} logged in");
                 return Box::pin(run_session(
                     terminal,
                     callsign,
@@ -282,6 +283,7 @@ async fn run_agw_listener(
                         warn!("failed to record AX.25 login: {error:#}");
                         return;
                     }
+                    info!("AX.25 client {remote} logged in");
                     if let Err(error) = Box::pin(run_session(
                         Terminal::new(connection),
                         remote,
