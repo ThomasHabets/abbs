@@ -200,7 +200,7 @@ where
                 )
                 .await?;
             }
-            "QUIT" if fields.next().is_none() => {
+            "QUIT" | "BYE" | "EXIT" if fields.next().is_none() => {
                 terminal.write_line("Goodbye.").await?;
                 terminal.shutdown().await?;
                 return Ok(());
@@ -598,7 +598,7 @@ where
         .write_line("  HELP                 Show this help")
         .await?;
     terminal
-        .write_line("  QUIT                 Disconnect")
+        .write_line("  QUIT, BYE, EXIT      Disconnect")
         .await?;
     Ok(())
 }

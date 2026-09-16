@@ -77,7 +77,7 @@ After connecting, type `HELP` to display the command list.
 | `SEND <callsign>` | Compose private mail. |
 | `SEND ALL` | Compose a public post. |
 | `DELETE <id>` | Permanently delete a private message you sent or received, or a public message you sent. |
-| `QUIT` | Disconnect. |
+| `QUIT`, `BYE`, `EXIT` | Disconnect. |
 
 `SEND` prompts for a subject and then accepts a multiline body. End the body
 with a line containing only `.`. Subjects are limited to 80 characters and

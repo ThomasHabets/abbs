@@ -539,6 +539,16 @@ async fn tcp_clients_can_exchange_private_and_public_messages_with_cr_and_crlf()
             .contains("No sent messages.")
     );
 
+    alice.send_line("BYE").await?;
+    assert!(
+        alice
+            .read_until(b"Goodbye.\r\n")
+            .await?
+            .contains("Goodbye.")
+    );
+    bob.send_line("EXIT").await?;
+    assert!(bob.read_until(b"Goodbye.\r\n").await?.contains("Goodbye."));
+
     bbs.shutdown().await?;
     remove_database(&database_path);
     let _ = fs::remove_dir_all(files_dir);
