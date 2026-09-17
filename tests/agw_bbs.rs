@@ -35,6 +35,14 @@ async fn read_bbs_output_until(server: &mut AGWServer, expected: &str) -> Result
     }
 }
 
+fn heard_reply_data(call: &str, first_heard: [u16; 8], last_heard: [u16; 8]) -> Vec<u8> {
+    let mut data = format!("{call}\0").into_bytes();
+    for field in first_heard.into_iter().chain(last_heard) {
+        data.extend_from_slice(&field.to_le_bytes());
+    }
+    data
+}
+
 async fn reply_to_heard_query(server: &mut AGWServer) -> Result<()> {
     let port = loop {
         match next_packet(server, "heard-stations query").await? {
@@ -45,8 +53,16 @@ async fn reply_to_heard_query(server: &mut AGWServer) -> Result<()> {
     };
     assert_eq!(port, Port(1));
     for data in [
-        b"M0HEARD Mon,21Feb2000 11:14:30\0".to_vec(),
-        b"M0OTHER-3 Mon,21Feb2000 11:14:30\0".to_vec(),
+        heard_reply_data(
+            "M0HEARD",
+            [2000, 2, 1, 21, 11, 14, 30, 0],
+            [2000, 2, 1, 21, 12, 18, 22, 500],
+        ),
+        heard_reply_data(
+            "M0OTHER-3",
+            [2001, 3, 2, 12, 13, 15, 17, 0],
+            [2001, 3, 2, 12, 14, 16, 18, 0],
+        ),
     ]
     .into_iter()
     .chain(std::iter::repeat_n(vec![0; 33], 18))
@@ -123,7 +139,10 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
 
         let heard = read_bbs_output_until(&mut server, "M0OTHER-3").await?;
         assert!(heard.contains("Heard callsigns:"));
-        assert!(heard.contains("M0HEARD"));
+        assert!(heard.contains(
+            "M0HEARD first heard: 2000-02-21 11:14:30.000; \
+                           last heard: 2000-02-21 12:18:22.500"
+        ));
         Ok::<(), anyhow::Error>(())
     });
 

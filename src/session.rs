@@ -829,9 +829,29 @@ where
 
     terminal.write_line("Heard callsigns:").await?;
     for callsign in callsigns {
-        terminal.write_line(&callsign.call.to_string()).await?;
+        terminal
+            .write_line(&format!(
+                "{} first heard: {}; last heard: {}",
+                callsign.call(),
+                format_heard_timestamp(callsign.first_heard()),
+                format_heard_timestamp(callsign.last_heard()),
+            ))
+            .await?;
     }
     Ok(())
+}
+
+fn format_heard_timestamp(timestamp: &agw::CallsignHeardTimestamp) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        timestamp.year(),
+        timestamp.month(),
+        timestamp.day(),
+        timestamp.hour(),
+        timestamp.minute(),
+        timestamp.second(),
+        timestamp.millisecond(),
+    )
 }
 
 async fn list_sent_messages<S>(
