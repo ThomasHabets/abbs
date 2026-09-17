@@ -139,10 +139,12 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
 
         let heard = read_bbs_output_until(&mut server, "M0OTHER-3").await?;
         assert!(heard.contains("Heard callsigns:"));
-        assert!(heard.contains(
-            "M0HEARD first heard: 2000-02-21 11:14:30.000; \
-                           last heard: 2000-02-21 12:18:22.500"
-        ));
+        let expected = format!(
+            "{:10} first heard: 2000-02-21 11:14:30.000; \
+             last heard: 2000-02-21 12:18:22.500",
+            "M0HEARD"
+        );
+        assert!(heard.contains(&expected));
         Ok::<(), anyhow::Error>(())
     });
 

@@ -831,7 +831,7 @@ where
     for callsign in callsigns {
         terminal
             .write_line(&format!(
-                "{} first heard: {}; last heard: {}",
+                "{:10} first heard: {}; last heard: {}",
                 callsign.call(),
                 format_heard_timestamp(callsign.first_heard()),
                 format_heard_timestamp(callsign.last_heard()),
