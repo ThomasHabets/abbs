@@ -658,6 +658,9 @@ where
     terminal
         .write_line(&format!("BBS callsign: {bbs_callsign}"))
         .await?;
+    terminal
+        .write_line("Software: <https://github.com/ThomasHabets/abbs>")
+        .await?;
     Ok(())
 }
 
