@@ -1,7 +1,7 @@
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
 use agw::{Port, r#async::AGW};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use log::{error, info, warn};
 use tokio::{
@@ -14,12 +14,29 @@ use tokio::{
 use crate::{
     callsign::Callsign,
     files::FileArea,
-    session::{AgwEndpoint, HeardConnector, OutboundConnector, SessionOptions, run_session},
+    session::{
+        AgwEndpoint, HeardConnector, OutboundConnector, SessionOptions, SessionRadio, run_session,
+    },
     store::{LoginTransport, MailStore},
     terminal::Terminal,
 };
 
 type Ax25SessionFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+/// Select exactly one radio backend; TCP clients remain available with either.
+#[derive(Clone, Debug)]
+pub enum RadioConfig {
+    Agw {
+        addr: String,
+        port: u8,
+        connect_via: bool,
+    },
+    Mercury {
+        host: String,
+        control_port: u16,
+        data_port: u16,
+    },
+}
 
 #[derive(Clone, Debug)]
 pub struct BbsConfig {
@@ -30,10 +47,8 @@ pub struct BbsConfig {
     pub prompt: String,
     pub body_prompt: String,
     pub allow_tcp_connect: bool,
-    pub connect_via: bool,
     pub tcp_listen: SocketAddr,
-    pub agw_addr: String,
-    pub agw_port: u8,
+    pub radio: RadioConfig,
 }
 
 pub struct BbsHandle {
@@ -62,12 +77,27 @@ impl BbsHandle {
     }
 }
 
-/// Initialize storage and start the TCP and AGW listeners.
+/// Initialize storage and start the TCP and selected radio listeners.
 ///
 /// # Errors
 ///
-/// Returns an error if SQLite initialization or TCP listener binding fails.
+/// Returns an error if configuration, SQLite initialization, or TCP binding fails.
 pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
+    if let RadioConfig::Mercury {
+        host,
+        control_port,
+        data_port,
+    } = &config.radio
+    {
+        ensure!(
+            !config.allow_tcp_connect,
+            "--allow-tcp-connect is unsupported with Mercury"
+        );
+        ensure!(
+            !host.is_empty() && *control_port != 0 && *data_port != 0,
+            "Mercury host and ports must be nonempty/nonzero"
+        );
+    }
     let store = MailStore::open(config.database_path.clone()).await?;
     let files = FileArea::open(config.files_dir.clone()).await?;
     let uploads = match config.uploads_dir.clone() {
@@ -90,19 +120,29 @@ pub async fn start(config: BbsConfig) -> Result<BbsHandle> {
         agw_endpoint_rx,
         shutdown.subscribe(),
     ));
-    let agw_task = tokio::spawn(agw_supervisor(
-        config,
-        store,
-        files,
-        uploads,
-        agw_endpoint,
-        shutdown.subscribe(),
-    ));
+    let radio_shutdown = shutdown.subscribe();
+    let radio_task = tokio::spawn(async move {
+        match config.radio {
+            RadioConfig::Agw { .. } => {
+                agw_supervisor(config, store, files, uploads, agw_endpoint, radio_shutdown).await;
+            }
+            RadioConfig::Mercury { .. } => {
+                Box::pin(crate::mercury::supervise(
+                    config,
+                    store,
+                    files,
+                    uploads,
+                    radio_shutdown,
+                ))
+                .await;
+            }
+        }
+    });
 
     Ok(BbsHandle {
         tcp_addr,
         shutdown,
-        tasks: vec![tcp_task, agw_task],
+        tasks: vec![tcp_task, radio_task],
     })
 }
 
@@ -184,10 +224,15 @@ async fn handle_tcp_session(
                         prompt: config.prompt,
                         body_prompt: config.body_prompt,
                         show_bbs_welcome: false,
-                        heard: HeardConnector::new(agw_endpoint.clone()),
-                        outbound: config
-                            .allow_tcp_connect
-                            .then(|| OutboundConnector::new(agw_endpoint)),
+                        radio: match config.radio {
+                            RadioConfig::Agw { .. } => SessionRadio::Agw {
+                                heard: HeardConnector::new(agw_endpoint.clone()),
+                                outbound: config
+                                    .allow_tcp_connect
+                                    .then(|| OutboundConnector::new(agw_endpoint)),
+                            },
+                            RadioConfig::Mercury { .. } => SessionRadio::Mercury,
+                        },
                     },
                 ))
                 .await;
@@ -242,25 +287,33 @@ async fn run_agw_listener(
     agw_endpoint: watch::Sender<Option<Arc<AgwEndpoint>>>,
     mut shutdown: broadcast::Receiver<()>,
 ) -> Result<()> {
+    let RadioConfig::Agw {
+        addr,
+        port,
+        connect_via,
+    } = &config.radio
+    else {
+        unreachable!("AGW listener requires AGW configuration");
+    };
     let agw = Arc::new(
-        AGW::new(&config.agw_addr)
+        AGW::new(addr)
             .await
-            .with_context(|| format!("failed to connect to AGW at {}", config.agw_addr))?,
+            .with_context(|| format!("failed to connect to AGW at {addr}"))?,
     );
     let bbs_call = config.callsign.to_agw_call()?;
     let mut listener = agw
-        .listen(Port(config.agw_port), &bbs_call)
+        .listen(Port(*port), &bbs_call)
         .await
         .context("failed to listen for AX.25 connections")?;
     agw_endpoint.send_replace(Some(Arc::new(AgwEndpoint::new(
         Arc::clone(&agw),
-        Port(config.agw_port),
+        Port(*port),
         bbs_call,
-        config.connect_via,
+        *connect_via,
     ))));
     info!(
-        "listening for AX.25 connections to {} on AGW {} port {}",
-        config.callsign, config.agw_addr, config.agw_port
+        "listening for AX.25 connections to {} on AGW {addr} port {port}",
+        config.callsign
     );
 
     let mut sessions: FuturesUnordered<Ax25SessionFuture<'_>> = FuturesUnordered::new();
@@ -297,8 +350,7 @@ async fn run_agw_listener(
                             prompt,
                             body_prompt,
                             show_bbs_welcome: true,
-                            heard,
-                            outbound: Some(outbound),
+                            radio: SessionRadio::Agw { heard, outbound: Some(outbound) },
                         },
                     )).await {
                         warn!("AX.25 session ended with error: {error:#}");

@@ -37,6 +37,7 @@ pub struct Message {
 pub enum LoginTransport {
     Tcp,
     Ax25,
+    Mercury,
 }
 
 impl LoginTransport {
@@ -44,6 +45,7 @@ impl LoginTransport {
         match self {
             Self::Tcp => "TCP",
             Self::Ax25 => "AX.25",
+            Self::Mercury => "MERCURY",
         }
     }
 }
@@ -240,7 +242,7 @@ impl MailStore {
 }
 
 fn initialize(path: &Path) -> Result<()> {
-    let connection = open_connection(path)?;
+    let mut connection = open_connection(path)?;
     connection.execute_batch(
         "PRAGMA journal_mode = WAL;
          CREATE TABLE IF NOT EXISTS messages (
@@ -265,13 +267,40 @@ fn initialize(path: &Path) -> Result<()> {
          CREATE TABLE IF NOT EXISTS logins (
              id INTEGER PRIMARY KEY,
              callsign TEXT NOT NULL,
-             transport TEXT NOT NULL CHECK (transport IN ('TCP', 'AX.25')),
+             transport TEXT NOT NULL CHECK (transport IN ('TCP', 'AX.25', 'MERCURY')),
              logged_in_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
          );
          CREATE INDEX IF NOT EXISTS logins_by_recency
              ON logins (id DESC);",
     )?;
     add_base_callsign_columns(&connection)?;
+    add_mercury_login_transport(&mut connection)?;
+    Ok(())
+}
+
+fn add_mercury_login_transport(connection: &mut Connection) -> Result<()> {
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let schema: String = transaction.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'logins'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !schema.contains("'MERCURY'") {
+        transaction.execute_batch(
+            "CREATE TABLE logins_with_mercury (
+                 id INTEGER PRIMARY KEY,
+                 callsign TEXT NOT NULL,
+                 transport TEXT NOT NULL CHECK (transport IN ('TCP', 'AX.25', 'MERCURY')),
+                 logged_in_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             );
+             INSERT INTO logins_with_mercury SELECT id, callsign, transport, logged_in_at FROM logins;
+             DROP TABLE logins;
+             ALTER TABLE logins_with_mercury RENAME TO logins;
+             CREATE INDEX logins_by_recency ON logins (id DESC);",
+        )?;
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -341,6 +370,7 @@ fn login_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LoginRecor
     let transport = match row.get::<_, String>(1)?.as_str() {
         "TCP" => LoginTransport::Tcp,
         "AX.25" => LoginTransport::Ax25,
+        "MERCURY" => LoginTransport::Mercury,
         other => {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 1,
@@ -379,6 +409,56 @@ mod tests {
     use rusqlite::{Connection, params};
 
     static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
+
+    #[tokio::test]
+    async fn mercury_login_migration_preserves_existing_history_and_is_repeatable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE logins (
+                 id INTEGER PRIMARY KEY,
+                 callsign TEXT NOT NULL,
+                 transport TEXT NOT NULL CHECK (transport IN ('TCP', 'AX.25')),
+                 logged_in_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             );
+             CREATE INDEX logins_by_recency ON logins (id DESC);
+             INSERT INTO logins VALUES (7, 'M0ALICE', 'TCP', '2020-01-02T03:04:05.000Z');
+             INSERT INTO logins VALUES (42, 'M0BOB', 'AX.25', '2021-01-02T03:04:05.000Z');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = MailStore::open(path.clone()).await.unwrap();
+        store
+            .record_login(Callsign::parse("M0HF").unwrap(), LoginTransport::Mercury)
+            .await
+            .unwrap();
+        let reopened = MailStore::open(path.clone()).await.unwrap();
+        let logins = reopened.recent_logins(10).await.unwrap();
+        assert_eq!(logins.len(), 3);
+        assert_eq!(logins[0].transport, LoginTransport::Mercury);
+        assert_eq!(logins[1].callsign.as_str(), "M0BOB");
+        assert_eq!(logins[1].transport, LoginTransport::Ax25);
+        assert_eq!(logins[1].logged_in_at, "2021-01-02T03:04:05.000Z");
+        assert_eq!(logins[2].transport, LoginTransport::Tcp);
+        assert_eq!(logins[2].logged_in_at, "2020-01-02T03:04:05.000Z");
+        let connection = Connection::open(&path).unwrap();
+        let ids: Vec<i64> = connection
+            .prepare("SELECT id FROM logins ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, [7, 42, 43]);
+        let indexes: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'logins_by_recency'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(indexes, 1);
+    }
 
     fn database_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

@@ -1,8 +1,9 @@
 # ABBS
 
 ABBS is a small amateur-radio bulletin board system. It accepts AX.25
-connections through an AGWPE-compatible endpoint such as Direwolf, as well as
-plain TCP terminal connections. Messages are stored in SQLite.
+connections through an AGWPE-compatible endpoint such as Direwolf, or incoming
+Mercury HF ARQ connections, as well as plain TCP terminal connections.
+Messages are stored in SQLite.
 
 <https://github.com/ThomasHabets/abbs/>
 
@@ -12,6 +13,8 @@ plain TCP terminal connections. Messages are stored in SQLite.
 - SQLite development/runtime libraries available to `rusqlite`.
 - For AX.25 access, an AGWPE-compatible service. Direwolf can provide one with
   an `AGWPORT` configured.
+- Alternatively, a Mercury TNC with its control and data TCP ports available.
+  ABBS uses the published `mercury-hf` crate; no local dependency checkout is needed.
 
 ## Run
 
@@ -23,8 +26,31 @@ cargo run -- --callsign M0BBS
 
 By default this creates `abbs.sqlite3`, listens for TCP clients on port 8000,
 and connects to an AGWPE endpoint at `127.0.0.1:8010` using radio port 1.  TCP
-stays available when the AGWPE endpoint is offline; the radio listener retries
-every five seconds.
+stays available when the radio endpoint is offline; the radio listener retries
+every five seconds. AGW supports multiple simultaneous connected clients, each
+with an independent command session.
+
+To use Mercury instead of AGW:
+
+```sh
+cargo run -- --callsign M0BBS --radio mercury --mercury-host 127.0.0.1
+```
+
+Mercury defaults to control port 8300 and data port 8301. Override them
+independently with `--mercury-control-port` and `--mercury-data-port`. ABBS sets
+the modem callsign, disables public-call acceptance, and enables listening;
+it leaves bandwidth settings unchanged. Use a dedicated modem connection:
+Mercury replaces existing control/data clients when another application connects.
+
+Mercury serves one incoming radio caller at a time, while TCP continues to
+support multiple simultaneous clients. Mailbox commands and ZMODEM uploads and
+downloads work on both radio backends. `HEARD` and `CONNECT` are unsupported
+in Mercury mode, including for TCP users; `--connect-via` and
+`--allow-tcp-connect` are rejected in that mode. `QUIT`, `BYE`, and `EXIT`
+request a Mercury radio disconnect, leaving the modem connection available for
+the next caller. A missing disconnect completion resets the modem connection
+after 60 seconds. Successful socket writes do not guarantee radio delivery of
+the final farewell.
 
 Files offered for download are placed in the `files` directory by default.
 Incoming ZMODEM uploads use that same directory by default. To hold uploads
@@ -44,8 +70,12 @@ Options:
 --allow-tcp-connect         Allow TCP clients to create AX.25 BBS connections
 --connect-via               Add this BBS as a seen AX.25 via hop for CONNECT
 --tcp-listen <ADDRESS>     TCP bind address [default: 0.0.0.0:8000]
+--radio <BACKEND>          Radio backend: agw or mercury [default: agw]
 --agw-addr <ADDRESS>       AGWPE/Direwolf endpoint [default: 127.0.0.1:8010]
 --agw-port <NUMBER>        AGWPE radio port [default: 1]
+--mercury-host <HOST>      Mercury hostname or IP address [default: 127.0.0.1]
+--mercury-control-port <N> Mercury control TCP port [default: 8300]
+--mercury-data-port <N>    Mercury data TCP port [default: 8301]
 ```
 
 For a local TCP session:
@@ -54,8 +84,8 @@ For a local TCP session:
 nc 127.0.0.1 8000
 ```
 
-The BBS prompts for a callsign on TCP. AX.25 sessions receive their identity
-from the remote callsign reported by AGWPE. Callsigns are normalized to
+The BBS prompts for a callsign on TCP. Radio sessions receive their identity
+from the remote callsign reported by AGWPE or Mercury. Callsigns are normalized to
 uppercase and must be ASCII alphanumeric/hyphen values no longer than ten
 characters.
 
@@ -123,7 +153,9 @@ seen digipeater hop instead. TCP clients can use this command only with
 permits clients to originate AX.25 connections under that stated callsign.
 
 `LOGINS` records and displays the callsign, login time, and whether the user
-connected over TCP or AX.25. It does not retain or display TCP IP addresses.
+connected over TCP, AX.25, or Mercury. It does not retain or display TCP IP addresses.
+Existing databases are upgraded automatically to accept Mercury login records,
+preserving existing messages and login history.
 `HEARD` sends the AGWPE `H` query over the BBS's active AGW connection to the
 selected radio port and displays the live response, including first- and
 last-heard timestamps. Endpoints that do not

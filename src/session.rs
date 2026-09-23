@@ -134,12 +134,19 @@ impl HeardConnector {
     }
 }
 
+pub(crate) enum SessionRadio {
+    Agw {
+        heard: HeardConnector,
+        outbound: Option<OutboundConnector>,
+    },
+    Mercury,
+}
+
 pub(crate) struct SessionOptions {
     pub prompt: String,
     pub body_prompt: String,
     pub show_bbs_welcome: bool,
-    pub heard: HeardConnector,
-    pub outbound: Option<OutboundConnector>,
+    pub radio: SessionRadio,
 }
 
 pub async fn run_session<S>(
@@ -154,15 +161,13 @@ pub async fn run_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    if options.show_bbs_welcome {
-        terminal
-            .write_line(&format!("Welcome to {bbs_callsign} amateur radio BBS."))
-            .await?;
-    }
-    terminal
-        .write_line(&format!("Welcome, {identity}."))
-        .await?;
-    terminal.write_line("Type HELP for commands.").await?;
+    write_welcome(
+        &mut terminal,
+        &identity,
+        &bbs_callsign,
+        options.show_bbs_welcome,
+    )
+    .await?;
 
     // ZMODEM's final acknowledgement is followed very closely by the sender
     // exiting.  Do not put ordinary terminal bytes behind it: a client-side
@@ -195,7 +200,13 @@ where
         let command = command.to_ascii_uppercase();
 
         match command.as_str() {
-            "HELP" if fields.next().is_none() => write_help(&mut terminal).await?,
+            "HELP" if fields.next().is_none() => {
+                write_help(
+                    &mut terminal,
+                    matches!(options.radio, SessionRadio::Agw { .. }),
+                )
+                .await?;
+            }
             "INFO" if fields.next().is_none() => write_info(&mut terminal, &bbs_callsign).await?,
             "LIST" if fields.next().is_none() => {
                 list_messages(&mut terminal, &store, identity.clone()).await?;
@@ -207,7 +218,7 @@ where
                 list_recent_logins(&mut terminal, &store).await?;
             }
             "HEARD" if fields.next().is_none() => {
-                list_heard_callsigns(&mut terminal, &options.heard).await?;
+                list_heard_callsigns(&mut terminal, &options.radio).await?;
             }
             "FILES" if fields.next().is_none() => {
                 list_files(&mut terminal, &files).await?;
@@ -219,13 +230,7 @@ where
             "DELETE" => delete_command(&mut terminal, &store, &identity, &mut fields).await?,
             "CONNECT" => {
                 if matches!(
-                    connect_command(
-                        &mut terminal,
-                        &identity,
-                        &mut fields,
-                        options.outbound.as_ref(),
-                    )
-                    .await?,
+                    connect_command(&mut terminal, &identity, &mut fields, &options.radio).await?,
                     ConnectExit::ClientDisconnected
                 ) {
                     info!("{identity} disconnected");
@@ -258,6 +263,27 @@ where
     }
 }
 
+async fn write_welcome<S>(
+    terminal: &mut Terminal<S>,
+    identity: &Callsign,
+    bbs_callsign: &Callsign,
+    show_bbs_welcome: bool,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if show_bbs_welcome {
+        terminal
+            .write_line(&format!("Welcome to {bbs_callsign} amateur radio BBS."))
+            .await?;
+    }
+    terminal
+        .write_line(&format!("Welcome, {identity}."))
+        .await?;
+    terminal.write_line("Type HELP for commands.").await?;
+    Ok(())
+}
+
 async fn handle_zmodem_input<S>(
     terminal: &mut Terminal<S>,
     uploads: &FileArea,
@@ -286,11 +312,17 @@ async fn connect_command<S>(
     terminal: &mut Terminal<S>,
     identity: &Callsign,
     fields: &mut SplitWhitespace<'_>,
-    outbound: Option<&OutboundConnector>,
+    radio: &SessionRadio,
 ) -> Result<ConnectExit>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let SessionRadio::Agw { outbound, .. } = radio else {
+        terminal
+            .write_line("CONNECT is unsupported with Mercury.")
+            .await?;
+        return Ok(ConnectExit::Continue);
+    };
     let Some(destination) = fields.next() else {
         terminal
             .write_line("Usage: CONNECT <destination> <ssid>")
@@ -601,7 +633,7 @@ where
     compose_message(terminal, store, identity.clone(), recipient, prompt).await
 }
 
-async fn write_help<S>(terminal: &mut Terminal<S>) -> Result<()>
+async fn write_help<S>(terminal: &mut Terminal<S>, supports_agw: bool) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -615,18 +647,22 @@ where
     terminal
         .write_line("  LOGINS               List the 10 most recent logins")
         .await?;
-    terminal
-        .write_line("  HEARD                List callsigns recently heard by AGW")
-        .await?;
+    if supports_agw {
+        terminal
+            .write_line("  HEARD                List callsigns recently heard by AGW")
+            .await?;
+    }
     terminal
         .write_line("  FILES                List files available for download")
         .await?;
     terminal
         .write_line("  DOWNLOAD <file>      Download a file using ZMODEM")
         .await?;
-    terminal
-        .write_line("  CONNECT <call> <ssid> Connect to a remote BBS over AX.25")
-        .await?;
+    if supports_agw {
+        terminal
+            .write_line("  CONNECT <call> <ssid> Connect to a remote BBS over AX.25")
+            .await?;
+    }
     terminal
         .write_line("  READ <id>            Read a visible message")
         .await?;
@@ -801,6 +837,7 @@ where
         let transport = match login.transport {
             LoginTransport::Tcp => "TCP",
             LoginTransport::Ax25 => "AX.25",
+            LoginTransport::Mercury => "MERCURY",
         };
         terminal
             .write_line(&format!(
@@ -812,10 +849,16 @@ where
     Ok(())
 }
 
-async fn list_heard_callsigns<S>(terminal: &mut Terminal<S>, heard: &HeardConnector) -> Result<()>
+async fn list_heard_callsigns<S>(terminal: &mut Terminal<S>, radio: &SessionRadio) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let SessionRadio::Agw { heard, .. } = radio else {
+        terminal
+            .write_line("HEARD is unsupported with Mercury.")
+            .await?;
+        return Ok(());
+    };
     let callsigns = match heard.callsigns_heard().await {
         Ok(callsigns) => callsigns,
         Err(error) => {

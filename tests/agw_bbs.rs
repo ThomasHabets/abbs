@@ -1,16 +1,174 @@
 use std::{
+    collections::HashMap,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
-use abbs::{BbsConfig, Callsign, start};
+use abbs::{BbsConfig, Callsign, RadioConfig, start};
 use agw::{Call, Packet, Pid, Port, ViaHop, r#async::AGWServer};
 use anyhow::{Context, Result, bail};
 use tokio::{net::TcpListener, time::timeout};
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
+
+/// Preserve output for other connections while waiting for a particular caller.
+struct ConcurrentClients {
+    server: AGWServer,
+    received: HashMap<Call, Vec<u8>>,
+    bbs: Call,
+}
+
+impl ConcurrentClients {
+    async fn connect(&mut self, remote: &Call) -> Result<()> {
+        self.server
+            .send(&Packet::IncomingConnect {
+                port: Port(1),
+                pid: Pid(0),
+                src: remote.clone(),
+                dst: self.bbs.clone(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn send(&mut self, remote: &Call, bytes: &[u8]) -> Result<()> {
+        self.server
+            .send(&Packet::Data {
+                port: Port(1),
+                pid: Pid(0xf0),
+                src: remote.clone(),
+                dst: self.bbs.clone(),
+                data: bytes.to_vec(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn read_until(&mut self, remote: &Call, marker: &[u8]) -> Result<String> {
+        loop {
+            let buffer = self.received.entry(remote.clone()).or_default();
+            if let Some(end) = buffer
+                .windows(marker.len())
+                .position(|window| window == marker)
+            {
+                return Ok(String::from_utf8(
+                    buffer.drain(..end + marker.len()).collect(),
+                )?);
+            }
+            match next_packet(&mut self.server, "per-client output").await? {
+                Packet::Data {
+                    port,
+                    src,
+                    dst,
+                    data,
+                    ..
+                } => {
+                    assert_eq!(port, Port(1));
+                    assert_eq!(src, self.bbs);
+                    self.received.entry(dst).or_default().extend(data);
+                }
+                packet => bail!("unexpected packet while waiting for {remote}: {packet:?}"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ax25_clients_have_concurrent_independent_sessions() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let bbs = start(BbsConfig {
+        callsign: Callsign::parse("M0BBS")?,
+        database_path: directory.path().join("bbs.sqlite3"),
+        files_dir: directory.path().join("files"),
+        uploads_dir: None,
+        prompt: "> ".into(),
+        body_prompt: "> ".into(),
+        allow_tcp_connect: false,
+        tcp_listen: "127.0.0.1:0".parse()?,
+        radio: RadioConfig::Agw {
+            addr: listener.local_addr()?.to_string(),
+            port: 1,
+            connect_via: false,
+        },
+    })
+    .await?;
+    let (stream, _) = timeout(Duration::from_secs(2), listener.accept()).await??;
+    let mut server = AGWServer::new(stream);
+    let Packet::RegisterCallsign(port, call) = next_packet(&mut server, "registration").await?
+    else {
+        bail!("expected callsign registration");
+    };
+    server
+        .send(&Packet::RegisterCallsignReply {
+            port,
+            call: call.clone(),
+            success: true,
+        })
+        .await?;
+    let mut clients = ConcurrentClients {
+        server,
+        received: HashMap::new(),
+        bbs: call,
+    };
+    let alice: Call = "M0ALICE".parse()?;
+    let bob: Call = "M0BOB".parse()?;
+    clients.connect(&alice).await?;
+    clients.connect(&bob).await?;
+    for caller in [&alice, &bob] {
+        let welcome = clients.read_until(caller, b"> ").await?;
+        assert!(welcome.contains(&format!("Welcome, {caller}.")));
+    }
+
+    // Both compose concurrently, with different input endings and message state.
+    clients.send(&alice, b"SEND M0BOB\r").await?;
+    clients.send(&bob, b"SEND ALL\r\n").await?;
+    clients.read_until(&alice, b"Subject: ").await?;
+    clients.read_until(&bob, b"Subject: ").await?;
+    clients.send(&bob, b"Bob's subject\r\n").await?;
+    clients.read_until(&bob, b"> ").await?;
+    clients.send(&alice, b"Alice's subject\r").await?;
+    clients.read_until(&alice, b"> ").await?;
+    clients.send(&alice, b"Alice's body\r").await?;
+    clients.read_until(&alice, b"> ").await?;
+    clients.send(&alice, b".\r").await?;
+    assert!(
+        clients
+            .read_until(&alice, b"> ")
+            .await?
+            .contains("Message #1 saved.")
+    );
+    // Bob is still composing, but Alice can list her own sent mail.
+    clients.send(&alice, b"SENT\r").await?;
+    let sent = clients.read_until(&alice, b"> ").await?;
+    assert!(sent.contains("Alice's subject"));
+    assert!(!sent.contains("Bob's subject"));
+    clients.send(&bob, b"Bob's body\r\n").await?;
+    clients.read_until(&bob, b"> ").await?;
+    clients.send(&bob, b".\r\n").await?;
+    assert!(
+        clients
+            .read_until(&bob, b"> ")
+            .await?
+            .contains("Message #2 saved.")
+    );
+    clients.send(&bob, b"SENT\r\n").await?;
+    let sent = clients.read_until(&bob, b"> ").await?;
+    assert!(sent.contains("Bob's subject"));
+    assert!(!sent.contains("Alice's subject"));
+
+    clients.send(&alice, b"QUIT\r").await?;
+    clients.read_until(&alice, b"Goodbye.\r\n").await?;
+    expect_disconnect(&mut clients.server, &clients.bbs, &alice).await?;
+    clients.send(&bob, b"READ 1\r\n").await?;
+    let message = clients.read_until(&bob, b"> ").await?;
+    assert!(message.contains("Alice's body"));
+    assert!(!message.contains("Bob's body"));
+    bbs.shutdown().await?;
+    Ok(())
+}
 
 fn database_path() -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -158,10 +316,12 @@ async fn accepts_an_ax25_connection_and_runs_the_shared_command_session() -> Res
         prompt: "> ".into(),
         body_prompt: "> ".into(),
         allow_tcp_connect: false,
-        connect_via: false,
         tcp_listen: "127.0.0.1:0".parse()?,
-        agw_addr,
-        agw_port: 1,
+        radio: RadioConfig::Agw {
+            addr: agw_addr,
+            port: 1,
+            connect_via: false,
+        },
     })
     .await?;
 
@@ -410,10 +570,12 @@ async fn run_ax25_connect_test(connect_via: bool) -> Result<()> {
         prompt: "> ".into(),
         body_prompt: "> ".into(),
         allow_tcp_connect: false,
-        connect_via,
         tcp_listen: "127.0.0.1:0".parse()?,
-        agw_addr,
-        agw_port: 1,
+        radio: RadioConfig::Agw {
+            addr: agw_addr,
+            port: 1,
+            connect_via,
+        },
     })
     .await?;
 
